@@ -242,6 +242,56 @@ describe('assertBootValid', () => {
   });
 });
 
+describe('validateConfig — identity header validation (security review, PR #17)', () => {
+  it('a valid default config (no AUTH_*_HEADER overrides, AUTH_EMAIL_HEADER unset) produces zero header-related errors', () => {
+    const cfg = resolveConfig(validEnv());
+    expect(validateConfig(cfg).filter((e) => e.setting.startsWith('AUTH_'))).toEqual([]);
+  });
+
+  it('rejects an AUTH_USER_HEADER containing a space or colon — not a valid HTTP header field-name', () => {
+    const cfg = resolveConfig(validEnv({ AUTH_USER_HEADER: 'Remote User:' }));
+    const errors = validateConfig(cfg);
+    expect(errors.some((e) => e.setting === 'AUTH_USER_HEADER')).toBe(true);
+  });
+
+  it('rejects an AUTH_GROUPS_HEADER with an invalid character', () => {
+    const cfg = resolveConfig(validEnv({ AUTH_GROUPS_HEADER: 'Remote/Groups' }));
+    const errors = validateConfig(cfg);
+    expect(errors.some((e) => e.setting === 'AUTH_GROUPS_HEADER')).toBe(true);
+  });
+
+  it('rejects an invalid AUTH_EMAIL_HEADER only when it is actually set (an unset/empty one is never validated — it is simply disabled)', () => {
+    const invalid = resolveConfig(validEnv({ AUTH_EMAIL_HEADER: 'Remote Email' }));
+    expect(validateConfig(invalid).some((e) => e.setting === 'AUTH_EMAIL_HEADER')).toBe(true);
+
+    const unset = resolveConfig(validEnv({ AUTH_EMAIL_HEADER: undefined }));
+    expect(validateConfig(unset).some((e) => e.setting === 'AUTH_EMAIL_HEADER')).toBe(false);
+  });
+
+  it('rejects AUTH_USER_HEADER and AUTH_GROUPS_HEADER being the same name', () => {
+    const cfg = resolveConfig(validEnv({ AUTH_GROUPS_HEADER: 'Remote-User' }));
+    const errors = validateConfig(cfg);
+    expect(errors.some((e) => e.setting === 'AUTH_USER_HEADER')).toBe(true);
+  });
+
+  it('rejects AUTH_EMAIL_HEADER colliding with AUTH_USER_HEADER or AUTH_GROUPS_HEADER (case-insensitively), only when it is set', () => {
+    const cfg = resolveConfig(validEnv({ AUTH_EMAIL_HEADER: 'remote-user' }));
+    const errors = validateConfig(cfg);
+    expect(errors.some((e) => e.setting === 'AUTH_USER_HEADER' || e.setting === 'AUTH_GROUPS_HEADER')).toBe(true);
+  });
+
+  it('accepts a fully-customised, valid, pairwise-distinct set of header names', () => {
+    const cfg = resolveConfig(
+      validEnv({
+        AUTH_USER_HEADER: 'X-Auth-Request-User',
+        AUTH_GROUPS_HEADER: 'X-Auth-Request-Groups',
+        AUTH_EMAIL_HEADER: 'X-Auth-Request-Email',
+      }),
+    );
+    expect(validateConfig(cfg).filter((e) => e.setting.startsWith('AUTH_'))).toEqual([]);
+  });
+});
+
 describe('detectLegacyAuthentikEnv (0.2.0 config contract: a leftover .env MUST NOT fail to boot)', () => {
   it('returns [] when no removed Authentik var is present', () => {
     expect(detectLegacyAuthentikEnv(validEnv())).toEqual([]);

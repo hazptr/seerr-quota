@@ -38,6 +38,16 @@ export type AuditAction =
    * resolved alias.
    */
   | 'member.alias_linked'
+  /** Operator action: clears a member's `login_alias` (`POST /api/admin/members/clear-alias`). Re-linking an alias is a trust decision, so undoing one is explicit and audited, never automatic. */
+  | 'member.alias_cleared'
+  /**
+   * The email-fallback resolution (`src/lib/auth/memberGate.ts`'s
+   * `tryLinkByEmail`) refused to link because the target row already has an
+   * alias, or is an operator/`ADMIN_USERS` row (never auto-linked). Written
+   * at most once per (header username, member) pair — see that file's
+   * dedup check — so a repeat visitor can't fill the log.
+   */
+  | 'member.alias_link_denied'
   | 'quota.set'
   | 'quota.cleared'
   | 'setting.changed'
@@ -83,6 +93,8 @@ export const AUDIT_ACTIONS = [
   'member.sync_changed',
   'member.entitlement_changed',
   'member.alias_linked',
+  'member.alias_cleared',
+  'member.alias_link_denied',
   'quota.set',
   'quota.cleared',
   'setting.changed',

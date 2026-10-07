@@ -11,6 +11,7 @@
 import { Pane } from '@/components/ui/Pane';
 import { formatGB, formatTimestamp } from '@/components/member/logic';
 import { MemberOverrideEditor } from './MemberOverrideEditor';
+import { ClearAliasControl } from './ClearAliasControl';
 import type { MemberDetailHeader as MemberDetailHeaderData } from '@/app/admin/members/[username]/_data/memberDetail';
 
 function QuotaSummary({ header }: { header: MemberDetailHeaderData }) {
@@ -47,6 +48,16 @@ export function MemberDetailHeader({ header, timeZone }: { header: MemberDetailH
           {header.syncStatus}
           {header.syncNote && <span style={{ color: 'var(--sq-muted)' }}> — {header.syncNote}</span>}
         </dd>
+
+        {header.loginAlias && (
+          <>
+            <dt style={labelStyle}>login alias</dt>
+            <dd style={valueStyle}>
+              {header.loginAlias}
+              <ClearAliasControl ssoUsername={header.ssoUsername} currentAlias={header.loginAlias} />
+            </dd>
+          </>
+        )}
 
         <dt style={labelStyle}>quota</dt>
         <dd style={valueStyle}>

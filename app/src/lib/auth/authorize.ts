@@ -28,6 +28,7 @@ import { NextResponse } from 'next/server';
 import { getDb } from '@/lib/db';
 import { newCorrelationId, writeAuditRow, type Source, type TargetType } from '@/lib/audit';
 import { getIdentity } from './session';
+import { getMemberGate } from './memberGate';
 import type { Identity } from './identity';
 
 export class AuthError extends Error {
@@ -86,6 +87,54 @@ export async function requireOperator(ctx: AccessCheckContext): Promise<Identity
   if (!identity.isOperator) {
     recordAccessDenied(identity, ctx);
     throw new AuthError(403, `forbidden: operator-only route (${ctx.route})`);
+  }
+  return identity;
+}
+
+/**
+ * Security review (PR #17): self-service DESTRUCTIVE routes (deletion
+ * schedule/execute/cancel) must re-check that the caller is a currently
+ * `matched`/entitled member — not just "some identity resolved" — before
+ * authorizing anything. `requireIdentity` alone is not enough here: it
+ * happily returns an `Identity` for a login with no `member` row at all,
+ * or one whose `sync_status` isn't `matched` (e.g. `not_entitled` — a
+ * deactivated/departed member whose OLD claims are still sitting in the
+ * `claim` table from before they lost entitlement), and the page-level
+ * FR-SSO-8 gate that would normally stop such a person from ever reaching
+ * the delete UI is NOT itself re-checked by the API route underneath it.
+ * Throws the SAME `AuthError(403)` shape as `requireOperator`, with the
+ * SAME `access.denied` audit row written first.
+ */
+export async function requireEntitledMember(ctx: AccessCheckContext): Promise<Identity> {
+  const identity = await requireIdentity();
+  const gate = await getMemberGate(identity);
+  if (gate.status !== 'ok') {
+    recordAccessDenied(identity, ctx);
+    throw new AuthError(403, `forbidden: not a currently matched/entitled member (${ctx.route})`);
+  }
+  return identity;
+}
+
+/**
+ * Same intent as `requireEntitledMember`, but an operator bypasses the
+ * member-gate check entirely. Used by `/api/deletion/cancel` (security
+ * review, PR #17): that route's own authority model is "owner OR operator"
+ * (`cancelScheduledDeletion` re-derives this from the `deletion` row
+ * itself, not from this check) — an operator whose OWN `member` row isn't
+ * `matched` (e.g. a service-account-shaped `ADMIN_USERS` entry with no
+ * Seerr account of its own) must still be able to cancel another member's
+ * scheduled deletion (`FR-DEL-28`). A non-operator calling this route is
+ * always acting on their OWN scheduled deletions, so the entitled-member
+ * check still applies to them exactly as it does to `/api/deletion/
+ * execute`.
+ */
+export async function requireEntitledMemberOrOperator(ctx: AccessCheckContext): Promise<Identity> {
+  const identity = await requireIdentity();
+  if (identity.isOperator) return identity;
+  const gate = await getMemberGate(identity);
+  if (gate.status !== 'ok') {
+    recordAccessDenied(identity, ctx);
+    throw new AuthError(403, `forbidden: not a currently matched/entitled member (${ctx.route})`);
   }
   return identity;
 }

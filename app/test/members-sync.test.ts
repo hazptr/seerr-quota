@@ -80,11 +80,15 @@ describe('syncMembers — roster comes straight from Seerr (0.2.0)', () => {
   });
 
   it('a Seerr user that disappears flips to entitled=false/not_entitled and the row is KEPT, never deleted', async () => {
-    const seerr = [fakeSeerrUser(6, { jellyfinUsername: 'erin' })];
+    // Three members so the mass-revocation guard (security review, PR #17,
+    // item 5) doesn't refuse this cycle — losing ONE of three is normal
+    // churn, not a suspicious empty/mass-revoking list. See the dedicated
+    // "mass-revocation refusal" describe block below for the empty-list case.
+    const seerr = [fakeSeerrUser(6, { jellyfinUsername: 'erin' }), fakeSeerrUser(7, { jellyfinUsername: 'frank' }), fakeSeerrUser(8, { jellyfinUsername: 'gus' })];
     await syncMembers({ seerrUsers: seerrUsersReturning(seerr) }, 4_000_000);
 
-    // Next cycle: Seerr no longer lists erin at all.
-    await syncMembers({ seerrUsers: seerrUsersReturning([]) }, 4_900_000);
+    // Next cycle: Seerr no longer lists erin, but frank/gus remain.
+    await syncMembers({ seerrUsers: seerrUsersReturning(seerr.slice(1)) }, 4_900_000);
 
     const row = getDb().select().from(member).where(eq(member.ssoUsername, 'erin')).get();
     expect(row).toBeDefined();
@@ -165,11 +169,13 @@ describe('syncMembers — audit discipline (FR-SYNC-9)', () => {
   });
 
   it('losing entitlement writes exactly one member.entitlement_changed audit row', async () => {
-    const seerr = [fakeSeerrUser(6, { jellyfinUsername: 'erin' })];
+    // Two members so the mass-revocation guard (security review, PR #17,
+    // item 5) doesn't refuse this cycle for being an empty list.
+    const seerr = [fakeSeerrUser(6, { jellyfinUsername: 'erin' }), fakeSeerrUser(9, { jellyfinUsername: 'ivy' })];
     await syncMembers({ seerrUsers: seerrUsersReturning(seerr) }, 4_000_000);
 
-    // Next cycle: erin's Seerr account is gone.
-    await syncMembers({ seerrUsers: seerrUsersReturning([]) }, 4_900_000);
+    // Next cycle: erin's Seerr account is gone, ivy's is not.
+    await syncMembers({ seerrUsers: seerrUsersReturning(seerr.slice(1)) }, 4_900_000);
 
     const rows = getDb().select().from(audit).where(eq(audit.targetId, 'erin')).all();
     const entitlementRows = rows.filter((r) => r.action === 'member.entitlement_changed');
@@ -290,11 +296,30 @@ describe('syncMembers — failure isolation (FR-SYNC-10): Seerr down must not ma
 });
 
 describe('syncMembers — is_operator (FR-ENF-6, background half: ADMIN_USERS only — no groups header off-request)', () => {
-  it('persists is_operator=true for a member whose USERNAME is in ADMIN_USERS (default ADMIN_USERS=admin)', async () => {
+  it('persists is_operator=true for an EXISTING member row already linked to a Seerr account whose key is in ADMIN_USERS (default ADMIN_USERS=admin)', async () => {
+    // `admin` can never be auto-created as a NEW row via classify (its key
+    // collides with ADMIN_USERS — see the next test) — so this test seeds
+    // the already-linked row directly, as if it had been established some
+    // other way (e.g. before ADMIN_USERS named it), and verifies isOperator
+    // gets (re)computed correctly on an ordinary sync of an EXISTING link.
+    getDb().insert(member).values({ ssoUsername: 'admin', entitled: true, isOperator: false, seerrUserId: 1, syncStatus: 'matched', firstSeenAt: 9_000_000, lastSyncedAt: 9_000_000 }).run();
+
+    await syncMembers({ seerrUsers: seerrUsersReturning([fakeSeerrUser(1, { jellyfinUsername: 'admin', username: null })]) }, 9_100_000);
+    const admin = getDb().select().from(member).where(eq(member.ssoUsername, 'admin')).get();
+    expect(admin?.seerrUserId).toBe(1);
+    expect(admin?.isOperator).toBe(true);
+  });
+
+  it('a brand-new Seerr account whose derived key matches ADMIN_USERS is never auto-granted a matched/operator row — surfaced ambiguous instead (security review, PR #17)', async () => {
     await syncMembers({ seerrUsers: seerrUsersReturning([fakeSeerrUser(1, { jellyfinUsername: null, username: 'admin' })]) }, 9_100_000);
 
-    const admin = getDb().select().from(member).where(eq(member.ssoUsername, 'admin')).get();
-    expect(admin?.isOperator).toBe(true);
+    const adminRow = getDb().select().from(member).where(eq(member.ssoUsername, 'admin')).get();
+    expect(adminRow).toBeUndefined(); // no row created at the reserved key
+
+    const ambiguousRow = getDb().select().from(member).where(eq(member.ssoUsername, 'seerr:1')).get();
+    expect(ambiguousRow).toBeDefined();
+    expect(ambiguousRow?.syncStatus).toBe('ambiguous');
+    expect(ambiguousRow?.isOperator).toBe(false);
   });
 
   it('a member outside ADMIN_USERS has is_operator=false, even if they would be in ADMIN_GROUP at request time', async () => {
@@ -302,5 +327,51 @@ describe('syncMembers — is_operator (FR-ENF-6, background half: ADMIN_USERS on
 
     const gus = getDb().select().from(member).where(eq(member.ssoUsername, 'gus')).get();
     expect(gus?.isOperator).toBe(false);
+  });
+});
+
+describe('syncMembers — mass-revocation refusal (FR-SYNC-10, security review PR #17 item 5)', () => {
+  it('refuses to apply (and records sync.failed) when Seerr returns an empty list while entitled members exist — member table untouched', async () => {
+    const seerr = [fakeSeerrUser(1, { jellyfinUsername: 'dana' }), fakeSeerrUser(2, { jellyfinUsername: 'erin' })];
+    await syncMembers({ seerrUsers: seerrUsersReturning(seerr) }, 10_000_000);
+    const before = getDb().select().from(member).all();
+    expect(before.every((m) => m.entitled)).toBe(true);
+
+    const result = await syncMembers({ seerrUsers: seerrUsersReturning([]) }, 10_100_000);
+    expect(result.classify.ok).toBe(false);
+    expect(result.classify.error).toContain('empty user list');
+
+    const after = getDb().select().from(member).all();
+    expect(after).toEqual(before); // completely untouched
+
+    const failedRows = getDb().select().from(audit).where(eq(audit.action, 'sync.failed')).all();
+    expect(failedRows.length).toBeGreaterThan(0);
+  });
+
+  it('refuses to apply when more than half of >2 entitled members would flip to not_entitled in one cycle', async () => {
+    const seerr = [1, 2, 3, 4].map((id) => fakeSeerrUser(id, { jellyfinUsername: `user${id}` }));
+    await syncMembers({ seerrUsers: seerrUsersReturning(seerr) }, 10_200_000);
+    const before = getDb().select().from(member).all();
+    expect(before).toHaveLength(4);
+
+    // Next cycle: 3 of 4 (75%) disappear from Seerr's list.
+    const result = await syncMembers({ seerrUsers: seerrUsersReturning([fakeSeerrUser(1, { jellyfinUsername: 'user1' })]) }, 10_300_000);
+    expect(result.classify.ok).toBe(false);
+    expect(result.classify.error).toContain('3 of 4');
+
+    const after = getDb().select().from(member).all();
+    expect(after).toEqual(before);
+  });
+
+  it('a normal small household losing one of three members is NOT refused — applies normally', async () => {
+    const seerr = [1, 2, 3].map((id) => fakeSeerrUser(id, { jellyfinUsername: `user${id}` }));
+    await syncMembers({ seerrUsers: seerrUsersReturning(seerr) }, 10_400_000);
+
+    const result = await syncMembers({ seerrUsers: seerrUsersReturning(seerr.slice(0, 2)) }, 10_500_000);
+    expect(result.classify.ok).toBe(true);
+
+    const user3 = getDb().select().from(member).where(eq(member.ssoUsername, 'user3')).get();
+    expect(user3?.entitled).toBe(false);
+    expect(user3?.syncStatus).toBe('not_entitled');
   });
 });

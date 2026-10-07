@@ -82,7 +82,14 @@ genuinely new Seerr account gets a freshly-derived key).
   MUST NOT (or the log fills with noise every 15 minutes).
 - **FR-SYNC-10** — If the Seerr user-list API is unreachable, the sync step
   MUST fail in isolation, leave the previous `member` state intact, mark the
-  data stale, and MUST NOT mass-flip everyone to `not_entitled`.
+  data stale, and MUST NOT mass-flip everyone to `not_entitled`. *(Extended,
+  security review PR #17)*: the SAME refusal applies to a Seerr response
+  that merely LOOKS successful but is suspiciously small — an empty list
+  while at least one member is currently entitled, or a list that would
+  flip more than half of more than two currently-entitled members to
+  `not_entitled` in one cycle. Both refuse exactly like an upstream error
+  (a `sync.failed` audit row, nothing applied) — see
+  `src/lib/members/classify.ts`'s `checkMassRevocationRisk`.
 
 ## Interactions
 

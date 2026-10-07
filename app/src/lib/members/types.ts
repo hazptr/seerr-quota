@@ -30,6 +30,17 @@ export interface ExistingMemberSnapshot {
   firstSeenAt: number;
   /** `ADMIN_USERS` (`FR-ENF-6`, background half — see `classify.ts`'s header comment). */
   isOperator: boolean;
+  /**
+   * `member.login_alias` (0.2.0, `src/lib/auth/memberGate.ts`). Classify
+   * NEVER writes this column — it's read-only here, purely so a brand-new
+   * member's derived key can be checked against every OTHER member's
+   * existing alias before being used (security review, PR #17): a new
+   * member accidentally keyed to a string that's already someone else's
+   * alias would let a future exact-match login silently shadow that
+   * alias's intended resolution. See `classify.ts`'s "shared namespace"
+   * section.
+   */
+  loginAlias: string | null;
 }
 
 /**

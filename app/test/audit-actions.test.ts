@@ -6,6 +6,8 @@ const SPEC_ACTIONS = [
   'member.sync_changed',
   'member.entitlement_changed',
   'member.alias_linked',
+  'member.alias_cleared',
+  'member.alias_link_denied',
   'quota.set',
   'quota.cleared',
   'setting.changed',
@@ -32,9 +34,9 @@ const SPEC_ACTIONS = [
 ];
 
 describe('audit action vocabulary — matches wiki/Feature-08-Audit-Log.md "Action vocabulary" exactly', () => {
-  it('AUDIT_ACTIONS contains exactly the 27 actions from the spec table (25 rows, one of which — title.protected/.unprotected — is two actions, plus 0.2.0\'s member.alias_linked), no more, no fewer', () => {
+  it('AUDIT_ACTIONS contains exactly the 29 actions from the spec table (25 rows, one of which — title.protected/.unprotected — is two actions, plus 0.2.0\'s member.alias_linked/alias_cleared/alias_link_denied), no more, no fewer', () => {
     expect([...AUDIT_ACTIONS].sort()).toEqual([...SPEC_ACTIONS].sort());
-    expect(AUDIT_ACTIONS.length).toBe(27);
+    expect(AUDIT_ACTIONS.length).toBe(29);
   });
 
   it('requiresTarget is false ONLY for webhook.rejected and sync.failed — the only two "Target: —" rows', () => {
@@ -42,7 +44,7 @@ describe('audit action vocabulary — matches wiki/Feature-08-Audit-Log.md "Acti
     expect(withoutTarget).toEqual(['sync.failed', 'webhook.rejected']);
 
     const withTarget = AUDIT_ACTIONS.filter((action) => requiresTarget(action));
-    expect(withTarget.length).toBe(25);
+    expect(withTarget.length).toBe(27);
   });
 
   it('a caller cannot invent an action string not in the vocabulary — compile-time proof', () => {

@@ -122,7 +122,16 @@ here either: it delays the deletion, but the import is still the older event.
   execute, actions on titles where they hold an **active claim**. Authorization
   MUST be re-checked server-side at execute time against freshly read
   attribution — never trusted from the client, and never from the list the UI
-  was rendered with, which may be minutes stale.
+  was rendered with, which may be minutes stale. *(Extended, security review
+  PR #17)*: the caller MUST ALSO be re-checked as a currently
+  `matched`/entitled `member` (`src/lib/auth/authorize.ts`'s
+  `requireEntitledMember`), not just "some identity resolved" — a
+  `not_entitled`/deactivated login must never reach `/api/deletion/execute`
+  or `/schedule`, even if old claims from before they lost entitlement are
+  still sitting in the `claim` table. `/api/deletion/cancel` uses the
+  looser `requireEntitledMemberOrOperator`, since an operator must still be
+  able to cancel ANOTHER member's scheduled deletion (`FR-DEL-28`)
+  regardless of the operator's own entitlement status.
 - **FR-DEL-2** — Files MUST only be deleted when the acting member is the
   **sole** active claimant. With more than one claimant, the only member action
   is **release claim**, which MUST NOT touch any file.

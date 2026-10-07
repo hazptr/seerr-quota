@@ -95,16 +95,47 @@ function parseUserPage(raw: unknown): { pageInfo: SeerrUserPageInfo; results: Se
 export class SeerrUsersClient {
   constructor(private readonly http: UpstreamClient) {}
 
-  /** Pages through every Seerr user via `take`/`skip`, same shape as `src/lib/seerr/client.ts`'s request pagination (`/api/v1/user` uses the same `{pageInfo, results}` envelope). */
+  /**
+   * Pages through every Seerr user via `take`/`skip`, same shape as
+   * `src/lib/seerr/client.ts`'s request pagination (`/api/v1/user` uses the
+   * same `{pageInfo, results}` envelope).
+   *
+   * **Fail-safe, not fail-silent (security review, PR #17, item 5).** A
+   * caller (`src/lib/members/sync.ts`'s `classifyMembers`) treats whatever
+   * this returns as the COMPLETE current roster — a short/partial list
+   * would read as "everyone else lost their Seerr account" and mass-flip
+   * real members to `not_entitled`. So this throws, rather than returning
+   * a partial list, in either failure shape:
+   *   - the loop exhausts `MAX_PAGES` without ever satisfying
+   *     `out.length >= pageInfo.results` (a pathological/looping
+   *     `pageInfo`, or a genuinely huge fleet past this safety cap);
+   *   - the final `out.length` doesn't match the last page's reported
+   *     `pageInfo.results` at all (an inconsistent/misbehaving upstream).
+   */
   async listAllUsers(pageSize: number = DEFAULT_PAGE_SIZE): Promise<SeerrUserForMatch[]> {
     const out: SeerrUserForMatch[] = [];
     let skip = 0;
+    let expectedTotal: number | undefined;
+    let completed = false;
     for (let page = 0; page < MAX_PAGES; page++) {
       const data = await this.http.request<unknown>(USER_PATH, { query: { take: pageSize, skip } });
       const parsed = parseUserPage(data);
+      expectedTotal = parsed.pageInfo.results;
       out.push(...parsed.results);
-      if (parsed.results.length === 0 || out.length >= parsed.pageInfo.results) break;
+      if (parsed.results.length === 0 || out.length >= parsed.pageInfo.results) {
+        completed = true;
+        break;
+      }
       skip += parsed.results.length;
+    }
+
+    if (!completed) {
+      invalidResponse(`exceeded MAX_PAGES (${MAX_PAGES}) while paginating — refusing to return a possibly-incomplete user list`);
+    }
+    if (expectedTotal !== undefined && out.length !== expectedTotal) {
+      invalidResponse(
+        `paginated result count (${out.length}) does not match the last page's pageInfo.results (${expectedTotal}) — refusing to return a possibly-incomplete user list`,
+      );
     }
     return out;
   }

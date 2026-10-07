@@ -21,9 +21,10 @@ vi.mock('next/headers', () => ({
   headers: async () => headersStore.current,
 }));
 
-const { requireIdentity, requireOperator, toAuthErrorResponse, AuthError } = await import('@/lib/auth/authorize');
+const { requireIdentity, requireOperator, requireEntitledMember, requireEntitledMemberOrOperator, toAuthErrorResponse, AuthError } =
+  await import('@/lib/auth/authorize');
 const { getDb } = await import('@/lib/db');
-const { audit } = await import('@/lib/db/schema');
+const { audit, member } = await import('@/lib/db/schema');
 const { _resetConfigCacheForTests } = await import('@/lib/config');
 const { NextResponse } = await import('next/server');
 const { eq } = await import('drizzle-orm');
@@ -113,6 +114,95 @@ describe('requireOperator (FR-SSO-5): returns the Identity or throws — never a
 
   it('throws AuthError(401), not 403, when there is no identity at all (401 takes precedence over the role check)', async () => {
     await expect(requireOperator({ route: '/admin/quota' })).rejects.toMatchObject({ status: 401 });
+  });
+});
+
+describe('requireEntitledMember (security review, PR #17): self-service destructive routes must re-check the member gate', () => {
+  function insertMember(ssoUsername: string, overrides: Partial<{ entitled: boolean; syncStatus: 'matched' | 'no_seerr_account' | 'not_entitled' | 'ambiguous' }> = {}) {
+    const now = Math.floor(Date.now() / 1000);
+    getDb()
+      .insert(member)
+      .values({
+        ssoUsername,
+        entitled: overrides.entitled ?? true,
+        isOperator: false,
+        syncStatus: overrides.syncStatus ?? 'matched',
+        firstSeenAt: now,
+        lastSyncedAt: now,
+      })
+      .run();
+  }
+
+  it('returns the Identity for a currently matched member', async () => {
+    insertMember('dana');
+    headersStore.current = new Headers({ 'Remote-User': 'dana' });
+    const identity = await requireEntitledMember({ route: '/api/deletion/execute' });
+    expect(identity.username).toBe('dana');
+  });
+
+  it('throws 403 (and audits) for a login with no member row at all', async () => {
+    headersStore.current = new Headers({ 'Remote-User': 'ghost' });
+    await expect(requireEntitledMember({ route: '/api/deletion/execute' })).rejects.toMatchObject({ status: 403 });
+    const rows = getDb().select().from(audit).where(eq(audit.action, 'access.denied')).all();
+    expect(rows.some((r) => r.targetId === '/api/deletion/execute' && r.actor === 'ghost')).toBe(true);
+  });
+
+  it('throws 403 for a not_entitled (deactivated) member — the exact pre-existing hole this closes', async () => {
+    insertMember('departed', { entitled: false, syncStatus: 'not_entitled' });
+    headersStore.current = new Headers({ 'Remote-User': 'departed' });
+    await expect(requireEntitledMember({ route: '/api/deletion/execute' })).rejects.toMatchObject({ status: 403 });
+  });
+
+  it('throws 403 for an ambiguous member', async () => {
+    insertMember('dupe', { syncStatus: 'ambiguous' });
+    headersStore.current = new Headers({ 'Remote-User': 'dupe' });
+    await expect(requireEntitledMember({ route: '/api/deletion/execute' })).rejects.toMatchObject({ status: 403 });
+  });
+
+  it('throws 401, not 403, when there is no identity at all', async () => {
+    await expect(requireEntitledMember({ route: '/api/deletion/execute' })).rejects.toMatchObject({ status: 401 });
+  });
+
+  it('being an operator does NOT bypass this check — an operator must still be a matched member to use their own delete flow', async () => {
+    insertMember('admin', { entitled: false, syncStatus: 'not_entitled' });
+    headersStore.current = new Headers({ 'Remote-User': 'admin' }); // 'admin' is in ADMIN_USERS by test default
+    await expect(requireEntitledMember({ route: '/api/deletion/execute' })).rejects.toMatchObject({ status: 403 });
+  });
+});
+
+describe('requireEntitledMemberOrOperator (security review, PR #17): /api/deletion/cancel — operator bypasses, member does not', () => {
+  function insertMember(ssoUsername: string, overrides: Partial<{ entitled: boolean; syncStatus: 'matched' | 'no_seerr_account' | 'not_entitled' | 'ambiguous' }> = {}) {
+    const now = Math.floor(Date.now() / 1000);
+    getDb()
+      .insert(member)
+      .values({
+        ssoUsername,
+        entitled: overrides.entitled ?? true,
+        isOperator: false,
+        syncStatus: overrides.syncStatus ?? 'matched',
+        firstSeenAt: now,
+        lastSyncedAt: now,
+      })
+      .run();
+  }
+
+  it('an operator with NO member row at all still passes (FR-DEL-28: cancelling another member\'s deletion)', async () => {
+    headersStore.current = new Headers({ 'Remote-User': 'admin' }); // operator via ADMIN_USERS, no member row
+    const identity = await requireEntitledMemberOrOperator({ route: '/api/deletion/cancel' });
+    expect(identity.isOperator).toBe(true);
+  });
+
+  it('a non-operator matched member passes', async () => {
+    insertMember('erin');
+    headersStore.current = new Headers({ 'Remote-User': 'erin' });
+    const identity = await requireEntitledMemberOrOperator({ route: '/api/deletion/cancel' });
+    expect(identity.username).toBe('erin');
+  });
+
+  it('a non-operator not_entitled member is refused', async () => {
+    insertMember('departed2', { entitled: false, syncStatus: 'not_entitled' });
+    headersStore.current = new Headers({ 'Remote-User': 'departed2' });
+    await expect(requireEntitledMemberOrOperator({ route: '/api/deletion/cancel' })).rejects.toMatchObject({ status: 403 });
   });
 });
 

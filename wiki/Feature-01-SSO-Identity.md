@@ -67,18 +67,35 @@ even on the loopback port.
   1. **Exact**: a `member` row already has `sso_username == headerUsername`.
   2. **Alias**: a `member` row already has `login_alias == headerUsername`
      (a PRIOR successful email resolution recorded it).
-  3. **Email**: if the configured email header (`AUTH_EMAIL_HEADER`, default
-     `Remote-Email`) is present and non-blank, and EXACTLY ONE entitled
-     member's `email` matches it case-insensitively, resolve to that member
-     and record `headerUsername` as its `login_alias` — audited
-     (`member.alias_linked`), first time only. Zero or more than one match
-     MUST refuse, never guess.
+  3. **Email** — ONLY when `AUTH_EMAIL_HEADER` is explicitly configured
+     (it defaults to EMPTY/disabled — see `FR-SSO-10` for why this must
+     not default to an actual header name). When enabled, and the
+     configured email header is present and non-blank, and EXACTLY ONE
+     *entitled, non-operator, not-yet-aliased* member's `email` matches it
+     case-insensitively, resolve to that member and record
+     `headerUsername` as its `login_alias` — audited
+     (`member.alias_linked`), first time only. Zero or more than one
+     match, a target that is an operator (or whose key is in
+     `ADMIN_USERS`), or a target that already has a different alias MUST
+     ALL refuse, never guess or overwrite — an operator role, and an
+     already-established alias, are only ever changed by an explicit
+     operator action (`POST /api/admin/members/clear-alias`,
+     `member.alias_cleared`).
   If none resolve, the raw header username is used unchanged (falls through
   to FR-SSO-8's "not linked yet" screen for a genuinely unknown login). Every
   downstream authorization check, audit `actor`, and DB lookup keyed on
   `sso_username` MUST use the RESOLVED key, never the raw header value —
   this is what stops one member from ever acting on another member's claims
   through a header collision with someone else's alias/`sso_username`.
+- **FR-SSO-10** *(0.2.0, security review)* — `AUTH_EMAIL_HEADER` and
+  `ADMIN_GROUP` MUST both default to EMPTY (disabled), never to an actual
+  header/group name. Both are only as trustworthy as the operator's own
+  proxy configuration — defaulting either one "on" would make an
+  unverified assumption about a reverse proxy this app has no way to
+  inspect, for a setting whose failure mode is identity confusion or
+  privilege escalation, not a cosmetic default. An operator opts in by
+  setting a real value after verifying (for `AUTH_EMAIL_HEADER`) that
+  their proxy unconditionally overwrites that header on every request.
 
 ## Interactions
 
@@ -182,12 +199,23 @@ Full sequence in [[Deployment]].
   the totals wrong.
 - **Email-header match is ambiguous or absent (FR-SSO-9)** — zero or more
   than one entitled member shares the header's email, or the proxy never
-  sends the header at all: refuse, never guess. The login falls through to
-  FR-SSO-8's "not linked yet" screen exactly as an unknown username would.
+  sends the header at all (or the feature isn't enabled at all): refuse,
+  never guess. The login falls through to FR-SSO-8's "not linked yet"
+  screen exactly as an unknown username would.
+- **Email-header match resolves to an operator, or to a member who already
+  has a different alias** — refuse, same as an ambiguous match. Writing an
+  audit row the FIRST time this is refused for a given (header username,
+  target member) pair (`member.alias_link_denied`), then staying silent on
+  an exact repeat so a confused or malicious retry can't fill the log.
 - **Header-username spoofing an existing alias/`sso_username`** — the alias
   write is guarded by a uniqueness check (app-level, re-verified by a DB
   unique index) before it's ever recorded; a collision is refused and
   audited (`invariant.violated`), never silently overwritten.
+- **An operator needs to undo a bad alias link** — `POST
+  /api/admin/members/clear-alias` clears `login_alias` (audited
+  `member.alias_cleared`); the next successful email-fallback resolution
+  (if the feature stays enabled) can then re-link it, going through the
+  exact same checks as a first-time link.
 
 ## Removed in 0.2.0
 

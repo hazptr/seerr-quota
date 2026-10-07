@@ -66,10 +66,13 @@ describe('resolveConfig precedence: env > config.yaml > default', () => {
     expect(cfg.upstreams.jellyfinPlaybackSource).toBe('rest');
     expect(cfg.upstreams.appUrl).toBe(''); // no default — required, see validateConfig
     expect(cfg.identity.adminUsers).toEqual([]); // no default — required, see validateConfig
-    expect(cfg.identity.adminGroup).toBe('admins');
+    // Security review (PR #17): both ADMIN_GROUP and AUTH_EMAIL_HEADER
+    // default to EMPTY (disabled) — neither is safe to assume "on" without
+    // an operator's deliberate opt-in. See wiki/Configuration.md.
+    expect(cfg.identity.adminGroup).toBe('');
     expect(cfg.identity.userHeader).toBe('Remote-User');
     expect(cfg.identity.groupsHeader).toBe('Remote-Groups');
-    expect(cfg.identity.emailHeader).toBe('Remote-Email');
+    expect(cfg.identity.emailHeader).toBe('');
     expect(cfg.runtime.enforcementEnabled).toBe(false);
     expect(cfg.runtime.graceBytes).toBe(0);
     expect(cfg.runtime.deleteRecentPlayDays).toBe(14);

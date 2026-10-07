@@ -14,12 +14,15 @@
  * body, and an in-flight client that still POSTs here must get the new, safer
  * behaviour rather than a 404 that looks like the delete silently failed.
  * `/api/deletion/schedule` exists as an alias for new callers.
- * Member-facing: any authenticated identity may call this for THEIR OWN
- * claims (`requireIdentity`, not `requireOperator` — this route has no
- * concept of "act on someone else's behalf", unlike the backend module's
- * operator-only `onBehalfOf`/`overrideGuards` options, which this route
- * deliberately never wires up — that is admin territory, out of this task's
- * scope).
+ * Member-facing: any currently matched/entitled identity may call this for
+ * THEIR OWN claims (`requireEntitledMember`, not `requireOperator` — this
+ * route has no concept of "act on someone else's behalf", unlike the
+ * backend module's operator-only `onBehalfOf`/`overrideGuards` options,
+ * which this route deliberately never wires up — that is admin territory,
+ * out of this task's scope). `requireEntitledMember` (security review, PR
+ * #17) additionally re-checks `member.sync_status === 'matched'` — plain
+ * `requireIdentity` would let a `not_entitled`/deactivated login (still
+ * holding old claims from before they lost entitlement) reach this route.
  *
  * This route does NOT re-implement any authorization rule. It exists only
  * to (1) resolve the caller's identity server-side — never trusted from the
@@ -48,7 +51,7 @@
  * before any upstream call would happen.
  */
 import { NextResponse, type NextRequest } from 'next/server';
-import { AuthError, requireIdentity, toAuthErrorResponse } from '@/lib/auth/authorize';
+import { AuthError, requireEntitledMember, toAuthErrorResponse } from '@/lib/auth/authorize';
 import { scheduleDeletionBatch, type DeletionMode, type DeletionRequestItem } from '@/lib/deletion';
 
 export const runtime = 'nodejs';
@@ -82,7 +85,10 @@ function parseItems(body: RawBody): DeletionRequestItem[] | null {
 export async function POST(req: NextRequest): Promise<NextResponse> {
   let identity;
   try {
-    identity = await requireIdentity();
+    // Security review (PR #17): re-checks `member.sync_status === 'matched'`
+    // server-side, not just "some identity resolved" — see
+    // `requireEntitledMember`'s own doc comment.
+    identity = await requireEntitledMember({ route: req.nextUrl.pathname });
   } catch (err) {
     if (err instanceof AuthError) return toAuthErrorResponse(err);
     throw err;

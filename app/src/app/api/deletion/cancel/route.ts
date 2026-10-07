@@ -15,7 +15,7 @@
  * someone else returns the same `not_found` as an id that doesn't exist.
  */
 import { NextResponse, type NextRequest } from 'next/server';
-import { AuthError, requireIdentity, toAuthErrorResponse } from '@/lib/auth/authorize';
+import { AuthError, requireEntitledMemberOrOperator, toAuthErrorResponse } from '@/lib/auth/authorize';
 import { cancelScheduledDeletion } from '@/lib/deletion';
 
 export const runtime = 'nodejs';
@@ -28,7 +28,11 @@ interface RawBody {
 export async function POST(req: NextRequest): Promise<NextResponse> {
   let identity;
   try {
-    identity = await requireIdentity();
+    // Security review (PR #17): a non-operator must be a currently
+    // matched/entitled member; an operator bypasses that check (they may
+    // be cancelling another member's deletion — FR-DEL-28) — see
+    // `requireEntitledMemberOrOperator`'s own doc comment.
+    identity = await requireEntitledMemberOrOperator({ route: req.nextUrl.pathname });
   } catch (err) {
     if (err instanceof AuthError) return toAuthErrorResponse(err);
     throw err;

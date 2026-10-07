@@ -1,36 +1,61 @@
 # seerr-quota — forward-auth example: Authelia (nginx)
 #
-# Reference text only — NOT applied automatically. Assumes Authelia's own
-# documented nginx `auth_request` snippet is already set up elsewhere in
-# your proxy config (the usual `/authelia/authz/...` internal location that
-# calls Authelia's `/api/authz/auth-request` endpoint and sets
-# $remote_user/$remote_groups/$remote_email via `auth_request_set`). This
-# file shows only the vhost side for seerr-quota: wiring those nginx
-# variables into the three headers this app reads.
+# Reference text only — NOT applied automatically.
+#
+# IMPORTANT (security review, PR #17): do NOT use `$remote_user` here — that
+# is nginx's OWN built-in variable for HTTP Basic-auth, not a general
+# "whatever auth_request_set assigned" variable; reusing the name risks
+# silently reading the wrong value (or none) depending on what else is in
+# your config. Use whatever variable NAME your own `auth_request_set` lines
+# actually assigned.
+#
+# This assumes SWAG's bundled `authelia-location.conf` include (the common
+# case) — that include's own `auth_request_set` lines populate `$user`,
+# `$groups`, and `$email` (NOT `$remote_user`/`$remote_groups`/
+# `$remote_email` — those names are never defined by it, which would make
+# nginx fail to load this config at all, not just resolve emptily). If
+# you're not on SWAG, open YOUR OWN authelia-location-equivalent include and
+# use whatever variable names it actually assigns instead of guessing.
 
 server {
     listen 443 ssl;
     server_name quota.*;
-    include /etc/nginx/ssl.conf;
+    include /config/nginx/ssl.conf;
 
     # Unauthenticated liveness for Gatus (FR-SSO-6) — must BYPASS the gate.
     location = /healthz {
-        proxy_pass http://seerr-quota:3000;
+        include /config/nginx/proxy.conf;
+        include /config/nginx/resolver.conf;
+        set $upstream_app seerr-quota;
+        set $upstream_port 3000;
+        set $upstream_proto http;
+        proxy_pass $upstream_proto://$upstream_app:$upstream_port;
     }
 
     location / {
-        # Authelia's forward-auth subrequest + the auth_request_set lines
-        # that populate $remote_user/$remote_groups/$remote_email — see
-        # Authelia's own nginx integration docs for the auth_request block
-        # itself; only the header mapping below is seerr-quota-specific.
-        include /etc/nginx/snippets/authelia-location.conf;
+        # SWAG's bundled Authelia forward-auth include — the `auth_request`
+        # subrequest plus the `auth_request_set $user/$groups/$email` lines.
+        # See SWAG's own docs/mods for the non-SWAG equivalent.
+        include /config/nginx/authelia-location.conf;
 
-        proxy_set_header Remote-User   $remote_user;
-        proxy_set_header Remote-Groups $remote_groups;
-        proxy_set_header Remote-Email  $remote_email;
-        proxy_pass http://seerr-quota:3000;
+        proxy_set_header Remote-User   $user;
+        proxy_set_header Remote-Groups $groups;
+        proxy_set_header Remote-Email  $email;
+        include /config/nginx/proxy.conf;
+        include /config/nginx/resolver.conf;
+        set $upstream_app seerr-quota;
+        set $upstream_port 3000;
+        set $upstream_proto http;
+        proxy_pass $upstream_proto://$upstream_app:$upstream_port;
     }
 }
 
 # The Seerr webhook does NOT traverse this vhost — Seerr reaches the app
 # directly over the shared Docker network (FR-SSO-7); see wiki/Deployment.md.
+#
+# `Remote-Email` above is shown only as a MAPPING EXAMPLE — this app's
+# AUTH_EMAIL_HEADER fallback defaults to DISABLED (see wiki/Configuration.md
+# and wiki/Feature-01-SSO-Identity.md). Only set AUTH_EMAIL_HEADER if you
+# have verified this exact `proxy_set_header Remote-Email` line is actually
+# reached on EVERY request through this vhost — an email header your proxy
+# does not unconditionally overwrite is a spoofable identity input.

@@ -85,13 +85,41 @@ export interface Config {
      * `src/lib/auth/identity.ts` and `src/lib/members/classify.ts`).
      */
     adminUsers: string[];
-    /** `ADMIN_GROUP` (default `admins`) — forward-auth group (any IdP) that also grants operator status AT REQUEST TIME ONLY; no groups header exists off-request, so this never affects `member.is_operator` (`FR-ENF-6`'s background half) — see `wiki/Configuration.md`. */
+    /**
+     * `ADMIN_GROUP` (default EMPTY — disabled). Forward-auth group (any IdP)
+     * that also grants operator status AT REQUEST TIME ONLY; no groups
+     * header exists off-request, so this never affects `member.is_operator`
+     * (`FR-ENF-6`'s background half) — see `wiki/Configuration.md`. Ships
+     * disabled by default (security review, PR #17) because it names a
+     * GROUP VALUE, not a header name — an operator must deliberately pick a
+     * group that actually exists and means "operator" in their IdP;
+     * defaulting to `admins` risked silently granting operator to whoever
+     * happens to land in a group with that name under a newly-configured
+     * IdP. `src/lib/auth/identity.ts`'s `isInAdminGroup` already treats an
+     * empty value as "never matches" defensively — this is that same
+     * behaviour, now the documented default.
+     */
     adminGroup: string;
     /** `AUTH_USER_HEADER` (default `Remote-User`) — the forward-auth header the reverse proxy (any IdP) is configured to overwrite with the authenticated login username on every request. */
     userHeader: string;
     /** `AUTH_GROUPS_HEADER` (default `Remote-Groups`) — same idea, for group membership; split on `|`/`,` as before. */
     groupsHeader: string;
-    /** `AUTH_EMAIL_HEADER` (default `Remote-Email`) — optional; used only for the one-time email-based member-resolution fallback (`src/lib/auth/memberGate.ts`). */
+    /**
+     * `AUTH_EMAIL_HEADER` (default EMPTY — disabled). When set, used for the
+     * one-time email-based member-resolution fallback
+     * (`src/lib/auth/memberGate.ts`'s `tryLinkByEmail`). Ships DISABLED by
+     * default (security review, PR #17): this header is only as trustworthy
+     * as the username/groups headers IF the reverse proxy is configured to
+     * overwrite it unconditionally too — a proxy that overwrites only
+     * `Remote-User`/`Remote-Groups` (e.g. Authentik's own forward-auth sets
+     * `X-authentik-*`, not an arbitrary `Remote-Email`, unless the vhost is
+     * explicitly configured to map one) would let a client-supplied copy of
+     * this header pass straight through, which is a privilege-escalation
+     * path (resolving to another member, or an operator) if left on by
+     * default. An operator who sets this MUST also configure their proxy to
+     * overwrite it on every request — see `wiki/Feature-01-SSO-Identity.md`
+     * and `examples/forward-auth/`.
+     */
     emailHeader: string;
   };
   /** `wiki/Configuration.md` §"Upstream endpoints". Always in use — this app has no per-upstream enable/disable flag. */
@@ -413,6 +441,16 @@ const REMOVED_AUTHENTIK_ENV_KEYS = [
  * ignored) — this is purely an informational one-line boot log, wired up by
  * `src/instrumentation.ts`.
  */
+/**
+ * RFC 7230 `token` — the character class legal in an HTTP header field-name.
+ * Used only to validate `AUTH_USER_HEADER`/`AUTH_GROUPS_HEADER`/
+ * `AUTH_EMAIL_HEADER` at boot (`validateConfig`) — not a general HTTP
+ * parser.
+ */
+function isValidHttpHeaderName(name: string): boolean {
+  return /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(name);
+}
+
 export function detectLegacyAuthentikEnv(env: EnvLike): string[] {
   return REMOVED_AUTHENTIK_ENV_KEYS.filter((key) => optStr(env, {}, key) !== undefined);
 }
@@ -436,10 +474,10 @@ export function resolveConfig(env: EnvLike, yamlText?: string): Config {
   return {
     identity: {
       adminUsers: csv(env, file, 'ADMIN_USERS', []),
-      adminGroup: str(env, file, 'ADMIN_GROUP', 'admins'),
+      adminGroup: str(env, file, 'ADMIN_GROUP', ''),
       userHeader: str(env, file, 'AUTH_USER_HEADER', 'Remote-User'),
       groupsHeader: str(env, file, 'AUTH_GROUPS_HEADER', 'Remote-Groups'),
-      emailHeader: str(env, file, 'AUTH_EMAIL_HEADER', 'Remote-Email'),
+      emailHeader: str(env, file, 'AUTH_EMAIL_HEADER', ''),
     },
     upstreams: {
       seerrUrl: str(env, file, 'SEERR_URL', 'http://jellyseerr:5055'),
@@ -595,6 +633,44 @@ export function validateConfig(config: Config): BootValidationError[] {
       setting: 'ADMIN_USERS',
       message: 'must not be empty — nobody could administer the app',
     });
+  }
+
+  // `AUTH_USER_HEADER`/`AUTH_GROUPS_HEADER`/`AUTH_EMAIL_HEADER` (security
+  // review, PR #17): each, if set, must be a syntactically valid HTTP header
+  // field-name (RFC 7230 `token`) — a value that could never actually be
+  // sent as a header name is almost certainly a misconfiguration (e.g. a
+  // stray colon, a URL pasted in by mistake), and failing loudly at boot is
+  // cheaper than debugging why identity silently never resolves. The three
+  // configured names (userHeader/groupsHeader always set; emailHeader only
+  // when enabled) must also be pairwise distinct — reusing one header for
+  // two purposes would let whichever purpose is parsed second silently
+  // shadow the first.
+  const configuredHeaders: Array<[string, string]> = [
+    ['AUTH_USER_HEADER', config.identity.userHeader],
+    ['AUTH_GROUPS_HEADER', config.identity.groupsHeader],
+  ];
+  if (config.identity.emailHeader.trim() !== '') {
+    configuredHeaders.push(['AUTH_EMAIL_HEADER', config.identity.emailHeader]);
+  }
+  for (const [name, value] of configuredHeaders) {
+    if (!isValidHttpHeaderName(value)) {
+      errors.push({
+        setting: name,
+        message: `"${value}" is not a valid HTTP header field-name (letters, digits, and !#$%&'*+-.^_\`|~ only, no spaces/colons) — refusing to boot with an identity header that could never actually be sent`,
+      });
+    }
+  }
+  for (let i = 0; i < configuredHeaders.length; i++) {
+    for (let j = i + 1; j < configuredHeaders.length; j++) {
+      const [nameA, valueA] = configuredHeaders[i];
+      const [nameB, valueB] = configuredHeaders[j];
+      if (valueA.toLowerCase() === valueB.toLowerCase()) {
+        errors.push({
+          setting: nameA,
+          message: `must differ from ${nameB} ("${valueA}") — reusing one header name for two identity purposes lets one silently shadow the other`,
+        });
+      }
+    }
   }
 
   if (config.upstreams.appUrl.trim() === '') {

@@ -43,7 +43,7 @@ import { getDb, type SeerrQuotaDb } from '../db';
 import { appSetting, member, quotaPolicy, syncRun } from '../db/schema';
 import { runStep, type StepResult } from '../http/syncStep';
 import { createSeerrUsersClient, type SeerrUsersClient } from './seerrUsers';
-import { classifyMembers, type OperatorConfig } from './classify';
+import { checkMassRevocationRisk, classifyMembers, type OperatorConfig } from './classify';
 import type { ClassifiedMember, ExistingMemberSnapshot } from './types';
 
 export interface MemberSyncResult {
@@ -89,6 +89,7 @@ function loadExistingMembers(db: SeerrQuotaDb): Map<string, ExistingMemberSnapsh
       syncNote: row.syncNote,
       firstSeenAt: row.firstSeenAt,
       isOperator: row.isOperator,
+      loginAlias: row.loginAlias,
     });
   }
   return snapshot;
@@ -273,6 +274,16 @@ export async function syncMembers(deps: MemberSyncDeps = {}, nowSeconds: number 
     const classifyStart = Date.now();
     try {
       const existingMembers = loadExistingMembers(db);
+
+      // Security review (PR #17), item 5: refuse rather than apply a
+      // suspiciously small/empty Seerr list — see `checkMassRevocationRisk`'s
+      // own doc comment. Nothing is read/written beyond this check; `member`
+      // stays exactly as it was, same as any other FR-SYNC-10 failure.
+      const massRevocationCheck = checkMassRevocationRisk(existingMembers, seerrUserList);
+      if (massRevocationCheck.refuse) {
+        throw new Error(massRevocationCheck.reason);
+      }
+
       classified = classifyMembers(seerrUserList, existingMembers, nowSeconds, operatorConfig);
       const defaultQuotaBytes = resolveDefaultQuotaBytes(db);
       persistClassifiedMembers(db, classified, existingMembers, defaultQuotaBytes, nowSeconds);

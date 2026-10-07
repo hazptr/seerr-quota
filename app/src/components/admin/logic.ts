@@ -251,7 +251,7 @@ export const ALL_PIPELINE_KINDS: readonly Exclude<PipelineKind, 'unknown'>[] = [
 ];
 
 export const PIPELINE_LABELS: Record<Exclude<PipelineKind, 'unknown'>, string> = {
-  members: 'account sync (identity / seerr accounts / classify)',
+  members: 'account sync (seerr accounts / classify)',
   library_requests: 'library + requests (movies / series / requests)',
   playback: 'playback (Jellyfin)',
   attribution: 'attribution (claims / usage)',

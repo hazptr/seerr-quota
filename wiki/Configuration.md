@@ -56,10 +56,15 @@ to authenticate the user and set these headers on every request. See
 | Setting | Default | Notes |
 |---|---|---|
 | `ADMIN_USERS` | *(none — required)* | Comma-separated login usernames; also satisfied, AT REQUEST TIME ONLY, by membership in `ADMIN_GROUP` (see below). No generic default exists; boot fails if unset or empty |
-| `ADMIN_GROUP` | `admins` | Request-time only — there is no groups header available to the background enforcement-exemption check (`FR-ENF-6`), so an `ADMIN_GROUP`-only admin stays subject to quota enforcement unless also listed in `ADMIN_USERS` or given an unlimited quota override |
-| `AUTH_USER_HEADER` | `Remote-User` | The header carrying the authenticated login username. The proxy MUST overwrite this on every request |
-| `AUTH_GROUPS_HEADER` | `Remote-Groups` | The header carrying group names, split on both `\|` and `,` |
-| `AUTH_EMAIL_HEADER` | `Remote-Email` | Optional. Used only for the one-time email-based member-resolution fallback when the header username doesn't exactly match an existing member (`wiki/Feature-01-SSO-Identity.md`) — safe to leave at the default even if your proxy never sends it |
+| `ADMIN_GROUP` | *(empty — disabled)* | Request-time only — there is no groups header available to the background enforcement-exemption check (`FR-ENF-6`), so an `ADMIN_GROUP`-only admin stays subject to quota enforcement unless also listed in `ADMIN_USERS` or given an unlimited quota override. Ships disabled: set it to a group your IdP actually uses to mean "operator" before relying on it — see `src/lib/auth/identity.ts`'s `isInAdminGroup` |
+| `AUTH_USER_HEADER` | `Remote-User` | The header carrying the authenticated login username. The proxy MUST overwrite this, unconditionally, on every request |
+| `AUTH_GROUPS_HEADER` | `Remote-Groups` | The header carrying group names, split on both `\|` and `,`. Same unconditional-overwrite requirement |
+| `AUTH_EMAIL_HEADER` | *(empty — disabled)* | Used only for the one-time email-based member-resolution fallback when the header username doesn't exactly match an existing member (`wiki/Feature-01-SSO-Identity.md`). **Ships disabled, and must stay disabled unless you have verified your proxy unconditionally overwrites this exact header on every request** — a header set only "when present" is forgeable by the client, and this fallback can resolve an unauthenticated-for-this-app caller to an existing member's identity. This is NOT automatically true just because a forward-auth gate is in front of you (e.g. Authentik's outpost sets `X-authentik-username`/`X-authentik-groups` by default, not an arbitrary `Remote-Email`) — check your own proxy config. Even when enabled, the resolution never auto-links an operator row or overwrites an existing `login_alias` — see `wiki/Feature-01-SSO-Identity.md` `FR-SSO-9` |
+
+All three header names, plus the validation that applies to them, are
+checked at boot (`src/lib/config.ts`'s `validateConfig`): each configured
+name must be a syntactically valid HTTP header field-name, and the three
+(when `AUTH_EMAIL_HEADER` is set) must be pairwise distinct.
 
 Leftover pre-0.2.0 settings (`AUTHENTIK_URL`, `AUTHENTIK_TOKEN`,
 `SEERR_APP_SLUG`, `SELF_APP_SLUG`, `AUTHENTIK_JELLYSEERR_APP_UUID`) no

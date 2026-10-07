@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security (PR #17 review — must-fix before merge)
+
+- **`AUTH_EMAIL_HEADER` now defaults to EMPTY (disabled)**, not
+  `Remote-Email`. The email-fallback login resolution only ever runs when
+  an operator explicitly sets this — see "Added (0.2.0)" below and the
+  Breaking/Upgrade notes for why the old default was unsafe.
+- **`ADMIN_GROUP` now defaults to EMPTY (disabled)**, not `admins` — an
+  operator must deliberately name a real group.
+- **The email fallback never auto-links an operator row** (an existing
+  `member.is_operator` row, or one whose key is in `ADMIN_USERS`) — that
+  must be an explicit operator action.
+- **The email fallback never overwrites an existing `login_alias`** —
+  a second resolution attempt against an already-aliased member is
+  refused and audited (deduplicated per header-username/member pair, not
+  once per request) rather than silently re-pointing the alias.
+- **`classifyMembers` no longer lets a new Seerr account overwrite an
+  already-linked member's identity**, collide with another member's
+  `login_alias`, or auto-grant operator status via a derived-key race
+  against `ADMIN_USERS` — all three are now surfaced as a per-account
+  `ambiguous` row at a collision-safe key instead, never touching
+  whatever (or whoever) already legitimately owns the contested key.
+- **`SeerrUsersClient.listAllUsers` now throws rather than returning a
+  silently-partial list** on a pagination-count mismatch or exhausted
+  retry budget; `syncMembers` now refuses to apply a sync cycle (same as
+  any other upstream failure) when Seerr's list comes back empty while
+  entitled members exist, or would flip more than half of more than two
+  currently-entitled members to `not_entitled` at once.
+- `AUTH_USER_HEADER`/`AUTH_GROUPS_HEADER`/`AUTH_EMAIL_HEADER` are now
+  validated at boot: each must be a syntactically valid HTTP header name,
+  and the three (when configured) must be pairwise distinct.
+- `POST /api/deletion/execute` (and `/schedule`, `/cancel`) now re-checks
+  that the caller resolves to an `entitled`, `matched` member before
+  authorizing a deletion — a not-yet-entitled or deactivated login can no
+  longer schedule/execute/cancel a deletion through those routes.
+- See the three `examples/forward-auth/*.nginx.snippet` files for
+  corrected Authelia/oauth2-proxy variable names and an explicit
+  opt-in-with-warning treatment of the Authentik email mapping — the
+  previous versions had bugs that would have broken login (Authelia:
+  colliding with nginx's own Basic-auth `$remote_user` variable and two
+  undefined variables; oauth2-proxy: a missing `/oauth2/` location would
+  have broken the sign-in/callback redirect loop) or implied the email
+  mapping was safe at default settings (it is opt-in only, see above).
+
 ### Added (0.2.0)
 
 - **IdP-agnostic forward-auth.** The app no longer has any Authentik-specific
@@ -14,13 +57,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Authelia, oauth2-proxy in front of any OIDC IdP, Pomerium, ...). Identity
   header names are now configurable: `AUTH_USER_HEADER` (default
   `Remote-User`), `AUTH_GROUPS_HEADER` (default `Remote-Groups`),
-  `AUTH_EMAIL_HEADER` (default `Remote-Email`, optional).
-- **Login → member resolution fallback.** If a forward-auth login username
-  doesn't exactly match an existing member, and the proxy supplies an email
-  header matching EXACTLY ONE entitled member, that member is resolved and
+  `AUTH_EMAIL_HEADER` (default EMPTY — disabled; see "Security" above for
+  why this must not default to an actual header name).
+- **Login → member resolution fallback — opt-in, off by default.** Once
+  `AUTH_EMAIL_HEADER` is explicitly configured: if a forward-auth login
+  username doesn't exactly match an existing member, and the proxy
+  supplies that email header matching EXACTLY ONE entitled member who is
+  neither an operator nor already aliased, that member is resolved and
   the login username is recorded as a `login_alias` (first time only,
   audited as `member.alias_linked`) so future logins resolve instantly.
-  Zero or ambiguous (>1) matches refuse rather than guess.
+  Zero/ambiguous matches, an operator target, or an already-set alias all
+  refuse rather than guess or overwrite — see "Security" above.
+- **Operator action: clear a member's login alias** —
+  `POST /api/admin/members/clear-alias` (`member.alias_cleared`, audited),
+  for undoing a stale/incorrect alias link; re-linking afterward goes
+  through the same email-fallback rules as a first-time link.
 - Three worked forward-auth examples in `examples/forward-auth/`: Authentik
   outpost, Authelia, and oauth2-proxy (nginx), replacing
   `examples/authentik.tf.snippet`.
@@ -71,23 +122,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Existing member keys are preserved.** No existing `member.sso_username`
   is changed or re-derived by this upgrade — every row already linked to a
   Seerr account (`seerr_user_id` set) keeps its exact login key.
-- **New: email-header fallback.** If your forward-auth proxy sends an email
-  header (`AUTH_EMAIL_HEADER`, default `Remote-Email`) and a login username
-  changes (e.g. you switch IdPs, or rename accounts), a member whose email
-  matches exactly one existing entitled member resolves automatically and
-  gets a `login_alias` recorded — no manual DB edit needed. This is OPT-IN
-  in effect: with no email header sent, behaviour is unchanged from before.
+- **New: email-header fallback — OFF by default, and it must stay off
+  unless you've verified your proxy (security review, PR #17).**
+  `AUTH_EMAIL_HEADER` now defaults to EMPTY (disabled); the fallback never
+  runs unless you explicitly set it. **Do not enable it unless you have
+  confirmed your reverse proxy unconditionally overwrites that exact
+  header on every request** — a header that only gets set "when present"
+  (rather than always replacing whatever the client sent) is forgeable,
+  and this fallback can resolve an unknown caller to an existing member's
+  identity. It is NOT safe to assume this is already true just because a
+  forward-auth gate is in front of you: e.g. Authentik's own outpost sets
+  `X-authentik-username`/`X-authentik-groups` by default, not an arbitrary
+  `Remote-Email` — you'd have to deliberately map an email claim into that
+  header yourself. Even when correctly configured and enabled, this
+  fallback additionally NEVER auto-links a row that is an operator (or
+  listed in `ADMIN_USERS`), and NEVER overwrites an alias a member already
+  has — both require an explicit operator action instead (`member.alias_cleared`,
+  `POST /api/admin/members/clear-alias`). See
+  `wiki/Feature-01-SSO-Identity.md`.
+- **`ADMIN_GROUP` now also defaults to EMPTY (disabled).** It previously
+  defaulted to `admins`; it now ships off until you deliberately point it
+  at a group your IdP actually uses to mean "operator". If you were
+  relying on the `admins` default, set `ADMIN_GROUP=admins` explicitly
+  going forward.
 - **Operator semantics clarified, not changed in the common case.**
   `ADMIN_USERS` continues to work exactly as before. If you were relying on
   `ADMIN_GROUP` ALONE (not also in `ADMIN_USERS`) for the background
   enforcement exemption, that exemption no longer applies — add that
   username to `ADMIN_USERS`, or set an explicit unlimited quota override, if
   you need it to continue.
-- **Deploying behind a non-Authentik proxy** now needs no code change at
-  all — just point `AUTH_USER_HEADER`/`AUTH_GROUPS_HEADER`/
-  `AUTH_EMAIL_HEADER` at whatever your proxy sets (defaults already match
-  Authentik's forward-auth convention, so an existing Authentik deployment
-  needs no `.env` change here either).
+- **Deploying behind a non-Authentik proxy** needs no code change — point
+  `AUTH_USER_HEADER`/`AUTH_GROUPS_HEADER` at whatever your proxy sets.
+  There is no "these defaults already match Authentik" shortcut for
+  `AUTH_EMAIL_HEADER`: Authentik's outpost does not set a header literally
+  named `Remote-Email` by default under any configuration this project
+  verified, so review and explicitly configure it per the note above
+  rather than assuming the defaults are already correct for your proxy.
+- **Mass-revocation guard (`FR-SYNC-10`, extended).** A sync cycle now
+  refuses to apply (and records `sync.failed`, changing nothing) when
+  Seerr's user list comes back empty while entitled members exist, or
+  when it would flip more than half of more than two currently-entitled
+  members to `not_entitled` in one cycle — protects against a flaky/
+  misbehaving Seerr response mass-revoking real members' access.
+- **Review your roster after upgrading.** Two shapes of surprise are
+  possible on the first post-upgrade sync, and are worth a manual look at
+  `/admin` before trusting the numbers: (a) a member your IdP used to
+  allow into this app but who never had (or no longer has) a Seerr
+  account becomes `not_entitled` (loses dashboard access; this is usually
+  correct, but confirm); (b) a Seerr account that was previously excluded
+  purely by NOT holding the old Authentik entitlement binding is now a
+  full `matched`/`entitled` member, subject to the default quota and
+  enforcement if enabled — if that's not what you want for a particular
+  account, set an explicit quota override or revoke their Seerr access
+  directly.
 
 ## [0.1.0] — 2026-10-07
 

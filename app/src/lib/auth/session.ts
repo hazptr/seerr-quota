@@ -47,7 +47,12 @@ export async function getIdentity(): Promise<Identity | null> {
   // `resolveIdentity`) and the resolved key — an operator listed in
   // `ADMIN_USERS` under their member key must stay recognised even if the
   // IdP ever sends a differently-cased or aliased header username.
-  const resolution = resolveMemberKey(raw.username, requestHeaders.get(emailHeader));
+  // `resolveMemberKey` re-checks `AUTH_EMAIL_HEADER` configuration itself
+  // (defense in depth), but this caller also only reads the header at all
+  // when it's configured — belt-and-suspenders against ever forwarding an
+  // unconfigured/empty header name into the Headers API.
+  const emailHeaderValue = emailHeader.trim() !== '' ? requestHeaders.get(emailHeader) : undefined;
+  const resolution = resolveMemberKey(raw.username, emailHeaderValue);
   const isOperator = raw.isOperator || isOperatorUser(resolution.ssoUsername, adminUsers);
 
   return { ...raw, username: resolution.ssoUsername, isOperator };
