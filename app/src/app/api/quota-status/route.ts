@@ -4,8 +4,9 @@
  * vhost for Seerr proxying its own `/_quota-status` location to
  * this app's `/api/quota-status` (the wiki's "Interactions" nginx snippet,
  * `examples/seerr-banner.nginx.snippet` in this task) —
- * that location includes the same Authentik forward-auth block as every
- * other gated vhost in front of it and sets `Remote-User`/`Remote-Groups`
+ * that location includes the same forward-auth block as every
+ * other gated vhost in front of it and sets the configured identity headers
+ * (default `Remote-User`/`Remote-Groups`)
  * before proxying, so this route sees exactly the identity
  * `src/lib/auth/session.ts`'s `getIdentity()` always resolves from.
  *
@@ -25,7 +26,7 @@
  * calls, no recomputation: `loadQuotaStatus` (`@/lib/quotaStatus/load.ts`)
  * is three small indexed reads against the reconciler's already-materialized
  * `claim`/`quota_policy`/`request_decision` tables. Nothing here calls
- * Seerr, Radarr, Sonarr, Jellyfin, or Authentik.
+ * Seerr, Radarr, Sonarr, or Jellyfin.
  */
 import { NextResponse } from 'next/server';
 import { getIdentity } from '@/lib/auth/session';

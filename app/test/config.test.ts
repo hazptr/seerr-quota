@@ -64,13 +64,12 @@ describe('resolveConfig precedence: env > config.yaml > default', () => {
     expect(cfg.upstreams.sonarrUrl).toBe('http://sonarr:8989');
     expect(cfg.upstreams.jellyfinUrl).toBe('http://jellyfin:8096');
     expect(cfg.upstreams.jellyfinPlaybackSource).toBe('rest');
-    expect(cfg.upstreams.authentikUrl).toBe(''); // no default — required, see validateConfig
     expect(cfg.upstreams.appUrl).toBe(''); // no default — required, see validateConfig
-    expect(cfg.upstreams.selfAppSlug).toBe('seerr-quota');
-    expect(cfg.upstreams.seerrAppSlug).toBe('jellyseerr');
-    expect(cfg.upstreams.authentikJellyseerrAppUuid).toBeUndefined();
     expect(cfg.identity.adminUsers).toEqual([]); // no default — required, see validateConfig
     expect(cfg.identity.adminGroup).toBe('admins');
+    expect(cfg.identity.userHeader).toBe('Remote-User');
+    expect(cfg.identity.groupsHeader).toBe('Remote-Groups');
+    expect(cfg.identity.emailHeader).toBe('Remote-Email');
     expect(cfg.runtime.enforcementEnabled).toBe(false);
     expect(cfg.runtime.graceBytes).toBe(0);
     expect(cfg.runtime.deleteRecentPlayDays).toBe(14);
@@ -99,15 +98,6 @@ describe('resolveConfig precedence: env > config.yaml > default', () => {
     );
   });
 
-  it('AUTHENTIK_JELLYSEERR_APP_UUID is optional — undefined by default, the trimmed value when set', () => {
-    expect(resolveConfig({}, '').upstreams.authentikJellyseerrAppUuid).toBeUndefined();
-    expect(resolveConfig({ AUTHENTIK_JELLYSEERR_APP_UUID: '  aaaaaaaa-aaaa-4aaa-8aaa-000000000001  ' }, '').upstreams.authentikJellyseerrAppUuid).toBe(
-      'aaaaaaaa-aaaa-4aaa-8aaa-000000000001',
-    );
-    // An empty string is "not set", same convention as every other setting.
-    expect(resolveConfig({ AUTHENTIK_JELLYSEERR_APP_UUID: '' }, '').upstreams.authentikJellyseerrAppUuid).toBeUndefined();
-  });
-
   it('RECONCILE_INTERVAL/UPSTREAM_TIMEOUT default to 15m/20s, parsed to milliseconds', () => {
     const cfg = resolveConfig({}, '');
     expect(cfg.scheduling.reconcileIntervalMs).toBe(15 * 60_000);
@@ -115,10 +105,19 @@ describe('resolveConfig precedence: env > config.yaml > default', () => {
     expect(cfg.scheduling.upstreamTimeoutMs).toBe(20_000);
   });
 
-  it('APP_URL/SELF_APP_SLUG are configurable — not hardcoded constants (FR-BAN-6/FR-ADM-9)', () => {
-    const cfg = resolveConfig({ APP_URL: 'https://quota-staging.example.com', SELF_APP_SLUG: 'seerr-quota-staging' }, '');
+  it('APP_URL is configurable — not a hardcoded constant (FR-BAN-6)', () => {
+    const cfg = resolveConfig({ APP_URL: 'https://quota-staging.example.com' }, '');
     expect(cfg.upstreams.appUrl).toBe('https://quota-staging.example.com');
-    expect(cfg.upstreams.selfAppSlug).toBe('seerr-quota-staging');
+  });
+
+  it('AUTH_USER_HEADER/AUTH_GROUPS_HEADER/AUTH_EMAIL_HEADER are configurable (0.2.0, IdP-agnostic forward-auth)', () => {
+    const cfg = resolveConfig(
+      { AUTH_USER_HEADER: 'X-Auth-Request-User', AUTH_GROUPS_HEADER: 'X-Auth-Request-Groups', AUTH_EMAIL_HEADER: 'X-Auth-Request-Email' },
+      '',
+    );
+    expect(cfg.identity.userHeader).toBe('X-Auth-Request-User');
+    expect(cfg.identity.groupsHeader).toBe('X-Auth-Request-Groups');
+    expect(cfg.identity.emailHeader).toBe('X-Auth-Request-Email');
   });
 
   it('config.yaml overrides the default when env does not set the key', () => {
@@ -203,7 +202,6 @@ describe('secrets come from env only — never config.yaml (wiki/Configuration.m
         'RADARR_API_KEY: from-yaml',
         'SONARR_API_KEY: from-yaml',
         'JELLYFIN_API_KEY: from-yaml',
-        'AUTHENTIK_TOKEN: from-yaml',
         'SEERR_WEBHOOK_SECRET: from-yaml',
         'SMTP_USER: from-yaml',
         'SMTP_PASS: from-yaml',
@@ -213,7 +211,6 @@ describe('secrets come from env only — never config.yaml (wiki/Configuration.m
     expect(cfg.secrets.radarrApiKey).toBe('');
     expect(cfg.secrets.sonarrApiKey).toBe('');
     expect(cfg.secrets.jellyfinApiKey).toBe('');
-    expect(cfg.secrets.authentikToken).toBe('');
     expect(cfg.secrets.seerrWebhookSecret).toBe('');
     expect(cfg.secrets.smtpUser).toBe('');
     expect(cfg.secrets.smtpPass).toBe('');
@@ -225,7 +222,6 @@ describe('secrets come from env only — never config.yaml (wiki/Configuration.m
       RADARR_API_KEY: 'r1',
       SONARR_API_KEY: 'so1',
       JELLYFIN_API_KEY: 'j1',
-      AUTHENTIK_TOKEN: 'a1',
       SEERR_WEBHOOK_SECRET: 'w1',
       SMTP_USER: 'u1',
       SMTP_PASS: 'p1',
@@ -235,7 +231,6 @@ describe('secrets come from env only — never config.yaml (wiki/Configuration.m
       radarrApiKey: 'r1',
       sonarrApiKey: 'so1',
       jellyfinApiKey: 'j1',
-      authentikToken: 'a1',
       seerrWebhookSecret: 'w1',
       smtpUser: 'u1',
       smtpPass: 'p1',

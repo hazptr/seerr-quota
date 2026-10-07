@@ -18,14 +18,14 @@
  * every subsequent boot is a runtime-settings-editor concern that lands with
  * the admin UI (P1-9 / P2-2), not this scaffold.
  *
- * Eight secrets come from the environment ONLY — never from `config.yaml` —
+ * Seven secrets come from the environment ONLY — never from `config.yaml` —
  * per `wiki/Configuration.md` "Secrets — `.env` only" and AGENTS.md rule 7.
  * They split into three REQUIREDNESS tiers, all enforced in `validateConfig`
  * below:
  *   - `SEERR_API_KEY`, `RADARR_API_KEY`, `SONARR_API_KEY`,
- *     `AUTHENTIK_TOKEN`, `SEERR_WEBHOOK_SECRET` — UNCONDITIONALLY required.
- *     This app has no per-upstream enable/disable flag, so it can't do its
- *     job without any of these four APIs + the webhook secret.
+ *     `SEERR_WEBHOOK_SECRET` — UNCONDITIONALLY required. This app has no
+ *     per-upstream enable/disable flag, so it can't do its job without any
+ *     of these three APIs + the webhook secret.
  *   - `JELLYFIN_API_KEY` — required ONLY when `upstreams.jellyfinPlaybackSource`
  *     is `rest` (the default). The legacy `db` fallback reads Jellyfin's own
  *     SQLite file instead and needs no key.
@@ -35,11 +35,10 @@
  *     a decline reason) makes this app's own hold notification the ONLY way a
  *     held member finds out why.
  *
- * Two non-secret settings are ALSO unconditionally required because they have
- * no sane generic default — `AUTHENTIK_URL` (this app's identity provider)
- * and `APP_URL` (this app's own public URL, used in notification links and
- * the in-Seerr banner). `ADMIN_USERS` has no built-in default either, for the
- * same reason. `SMTP_HOST`/`SMTP_FROM` DO ship with generic `example.com`
+ * `APP_URL` (this app's own public URL, used in notification links and the
+ * in-Seerr banner) is ALSO unconditionally required — it has no sane generic
+ * default. `ADMIN_USERS` has no built-in default either, for the same
+ * reason. `SMTP_HOST`/`SMTP_FROM` DO ship with generic `example.com`
  * placeholder defaults rather than being required, since a real deployment
  * will virtually always want to set them explicitly anyway and gating boot
  * on them would be one more thing to configure before the app's happy path
@@ -47,6 +46,19 @@
  * This module never logs a secret value; `resolveConfig` doesn't log at all,
  * and callers must not `JSON.stringify`/log the `secrets` branch of the
  * returned `Config`.
+ *
+ * **Since 0.2.0 this app has no built-in identity provider integration at
+ * all** — it is IdP-agnostic, trusting whatever forward-auth proxy sits in
+ * front of it (Authentik, Authelia, oauth2-proxy in front of any OIDC IdP,
+ * Pomerium, ...) to authenticate and inject the configured headers
+ * (`AUTH_USER_HEADER`/`AUTH_GROUPS_HEADER`/`AUTH_EMAIL_HEADER`, defaults
+ * `Remote-User`/`Remote-Groups`/`Remote-Email`). `AUTHENTIK_URL`,
+ * `AUTHENTIK_TOKEN`, `SEERR_APP_SLUG`, `SELF_APP_SLUG`,
+ * `AUTHENTIK_JELLYSEERR_APP_UUID` no longer exist as settings — a value left
+ * over for any of them in an existing deployment's `.env` is silently
+ * ignored (never read), so an upgrade never fails to boot over it; see
+ * `detectLegacyAuthentikEnv` below (called from `src/instrumentation.ts`)
+ * for the one-line, no-values boot log emitted when it spots one.
  *
  * `resolveConfig` is a pure function (env + config.yaml text in, `Config`
  * out) so precedence is hand-testable without touching the filesystem or
@@ -65,10 +77,22 @@ export type EnvLike = Record<string, string | undefined>;
 export interface Config {
   /** `wiki/Configuration.md` §Identity. */
   identity: {
-    /** `ADMIN_USERS` (no default — required, see boot validation) — comma-separated SSO usernames treated as operator. */
+    /**
+     * `ADMIN_USERS` (no default — required, see boot validation) —
+     * comma-separated login usernames treated as operator (request-time: by
+     * resolved member key OR raw header username; background/enforcement
+     * exemption: by `member.sso_username` only — see
+     * `src/lib/auth/identity.ts` and `src/lib/members/classify.ts`).
+     */
     adminUsers: string[];
-    /** `ADMIN_GROUP` (default `admins`) — Authentik group that also grants operator status. */
+    /** `ADMIN_GROUP` (default `admins`) — forward-auth group (any IdP) that also grants operator status AT REQUEST TIME ONLY; no groups header exists off-request, so this never affects `member.is_operator` (`FR-ENF-6`'s background half) — see `wiki/Configuration.md`. */
     adminGroup: string;
+    /** `AUTH_USER_HEADER` (default `Remote-User`) — the forward-auth header the reverse proxy (any IdP) is configured to overwrite with the authenticated login username on every request. */
+    userHeader: string;
+    /** `AUTH_GROUPS_HEADER` (default `Remote-Groups`) — same idea, for group membership; split on `|`/`,` as before. */
+    groupsHeader: string;
+    /** `AUTH_EMAIL_HEADER` (default `Remote-Email`) — optional; used only for the one-time email-based member-resolution fallback (`src/lib/auth/memberGate.ts`). */
+    emailHeader: string;
   };
   /** `wiki/Configuration.md` §"Upstream endpoints". Always in use — this app has no per-upstream enable/disable flag. */
   upstreams: {
@@ -92,8 +116,6 @@ export interface Config {
      * the default rather than `db`.
      */
     jellyfinPlaybackSource: 'db' | 'rest';
-    /** `AUTHENTIK_URL` (no default — required, see boot validation). */
-    authentikUrl: string;
     /**
      * `APP_URL` (no default — required, see boot validation) — this app's own
      * public URL. Not a constant: it ends up in outbound member-notification
@@ -102,28 +124,6 @@ export interface Config {
      * `wiki/Configuration.md`.
      */
     appUrl: string;
-    /**
-     * `SELF_APP_SLUG` (default `seerr-quota`) — this app's OWN Authentik
-     * application slug, for the entitlement-drift comparison against
-     * `seerrAppSlug` below (`FR-ADM-9`). Distinct from `seerrAppSlug`, which
-     * names `jellyseerr`'s slug, not this app's.
-     */
-    selfAppSlug: string;
-    /** `SEERR_APP_SLUG` (default `jellyseerr`) — the Authentik slug entitlement is read from; deliberately not `seerr`. */
-    seerrAppSlug: string;
-    /**
-     * `AUTHENTIK_JELLYSEERR_APP_UUID` — optional. The `jellyseerr` app's UUID
-     * is static (it's already a `local.proxy_services` key in `main.tf`), so it CAN be
-     * handed to this app via a terraform `output` instead of resolved at
-     * runtime via `GET /core/applications/{slug}/` every reconcile — one
-     * fewer per-cycle call against an endpoint whose sibling (`?slug=`) is
-     * documented unreliable. `undefined` when not set (no terraform output
-     * wired yet) — `src/lib/authentik/identity.ts`'s `fetchEntitledIdentities`
-     * falls back to the verified detail-by-slug lookup using `seerrAppSlug`
-     * above in that case; both paths are exercised in
-     * `test/authentik-identity.test.ts`.
-     */
-    authentikJellyseerrAppUuid: string | undefined;
   };
   /**
    * `wiki/Configuration.md` §"Upstream endpoints" (the SMTP rows). Split out
@@ -151,8 +151,6 @@ export interface Config {
     sonarrApiKey: string;
     /** `JELLYFIN_API_KEY` — a dedicated key created in the Jellyfin admin UI. Required ONLY when `upstreams.jellyfinPlaybackSource` is `rest` (the default). */
     jellyfinApiKey: string;
-    /** `AUTHENTIK_TOKEN` — a DEDICATED Authentik service token declared in terraform, never the operator token from `terraform.tfvars`. Unconditionally required. */
-    authentikToken: string;
     /** `SEERR_WEBHOOK_SECRET` — generated; also pasted into Seerr's webhook custom header. Unconditionally required. */
     seerrWebhookSecret: string;
     /** `SMTP_USER` — SMTP relay credential. Required ONLY when `runtime.enforcementEnabled` is true (`D-4a`). */
@@ -394,6 +392,32 @@ export function parseDurationMs(raw: string, defMs: number): number {
 }
 
 /**
+ * Settings removed in 0.2.0 (the Authentik-specific integration — see
+ * `CHANGELOG.md` "Breaking/Upgrade notes"). Listed here ONLY so
+ * `detectLegacyAuthentikEnv` can name them in a single deprecation line at
+ * boot; `resolveConfig` never reads any of them.
+ */
+const REMOVED_AUTHENTIK_ENV_KEYS = [
+  'AUTHENTIK_URL',
+  'AUTHENTIK_TOKEN',
+  'SEERR_APP_SLUG',
+  'SELF_APP_SLUG',
+  'AUTHENTIK_JELLYSEERR_APP_UUID',
+] as const;
+
+/**
+ * Returns the names (never the values — these may be secrets) of any 0.2.0-
+ * removed Authentik env vars still present and non-empty in `env`. An
+ * existing deployment's `.env` left over from before this cutover MUST NOT
+ * fail to boot over this (config contract: unknown leftover vars are
+ * ignored) — this is purely an informational one-line boot log, wired up by
+ * `src/instrumentation.ts`.
+ */
+export function detectLegacyAuthentikEnv(env: EnvLike): string[] {
+  return REMOVED_AUTHENTIK_ENV_KEYS.filter((key) => optStr(env, {}, key) !== undefined);
+}
+
+/**
  * Pure resolver: `env` + the raw text of an (optional) `config.yaml` in, a
  * fully-typed `Config` out. No filesystem or network access — inject
  * whatever you want to hand-test precedence. `yamlText` may be `undefined`
@@ -413,6 +437,9 @@ export function resolveConfig(env: EnvLike, yamlText?: string): Config {
     identity: {
       adminUsers: csv(env, file, 'ADMIN_USERS', []),
       adminGroup: str(env, file, 'ADMIN_GROUP', 'admins'),
+      userHeader: str(env, file, 'AUTH_USER_HEADER', 'Remote-User'),
+      groupsHeader: str(env, file, 'AUTH_GROUPS_HEADER', 'Remote-Groups'),
+      emailHeader: str(env, file, 'AUTH_EMAIL_HEADER', 'Remote-Email'),
     },
     upstreams: {
       seerrUrl: str(env, file, 'SEERR_URL', 'http://jellyseerr:5055'),
@@ -421,11 +448,7 @@ export function resolveConfig(env: EnvLike, yamlText?: string): Config {
       jellyfinUrl: str(env, file, 'JELLYFIN_URL', 'http://jellyfin:8096'),
       jellyfinPlaybackSource:
         str(env, file, 'JELLYFIN_PLAYBACK_SOURCE', 'rest') === 'db' ? 'db' : 'rest',
-      authentikUrl: str(env, file, 'AUTHENTIK_URL', ''),
       appUrl: str(env, file, 'APP_URL', ''),
-      selfAppSlug: str(env, file, 'SELF_APP_SLUG', 'seerr-quota'),
-      seerrAppSlug: str(env, file, 'SEERR_APP_SLUG', 'jellyseerr'),
-      authentikJellyseerrAppUuid: optStr(env, file, 'AUTHENTIK_JELLYSEERR_APP_UUID'),
     },
     smtp: {
       host: str(env, file, 'SMTP_HOST', 'mail.example.com'),
@@ -437,7 +460,6 @@ export function resolveConfig(env: EnvLike, yamlText?: string): Config {
       radarrApiKey: secretFromEnv(env, 'RADARR_API_KEY'),
       sonarrApiKey: secretFromEnv(env, 'SONARR_API_KEY'),
       jellyfinApiKey: secretFromEnv(env, 'JELLYFIN_API_KEY'),
-      authentikToken: secretFromEnv(env, 'AUTHENTIK_TOKEN'),
       seerrWebhookSecret: secretFromEnv(env, 'SEERR_WEBHOOK_SECRET'),
       smtpUser: secretFromEnv(env, 'SMTP_USER'),
       smtpPass: secretFromEnv(env, 'SMTP_PASS'),
@@ -516,16 +538,17 @@ export class BootValidationFailure extends Error {
  *
  * Checks, per wiki/Configuration.md:
  *   - Any missing secret for an upstream it's configured to use. This app
- *     has no per-upstream enable/disable flag (Seerr/Radarr/Sonarr/Jellyfin/
- *     Authentik are all always in use per wiki/Architecture.md's data-source
- *     table), so the Seerr/Radarr/Sonarr/Authentik secrets + the webhook
- *     secret are required unconditionally; `JELLYFIN_API_KEY` is required
- *     only when `JELLYFIN_PLAYBACK_SOURCE` is `rest` (the default).
+ *     has no per-upstream enable/disable flag (Seerr/Radarr/Sonarr/Jellyfin
+ *     are all always in use per wiki/Architecture.md's data-source table),
+ *     so the Seerr/Radarr/Sonarr secrets + the webhook secret are required
+ *     unconditionally; `JELLYFIN_API_KEY` is required only when
+ *     `JELLYFIN_PLAYBACK_SOURCE` is `rest` (the default). Identity has no
+ *     secret of its own since 0.2.0 — it's just the configured header names
+ *     a trusted forward-auth proxy (any IdP) is assumed to set.
  *   - `ADMIN_USERS` empty (nobody could administer it).
- *   - `AUTHENTIK_URL` / `APP_URL` empty. Both are deployment-specific with no
- *     sane generic default — this app always uses Authentik for identity and
- *     always needs its own public URL for notification links and the
- *     in-Seerr banner, so both are required unconditionally.
+ *   - `APP_URL` empty — deployment-specific with no sane generic default;
+ *     this app always needs its own public URL for notification links and
+ *     the in-Seerr banner.
  *   - `enforcement_enabled = true` with SMTP unconfigured (`SMTP_USER`/
  *     `SMTP_PASS` missing). Per `D-4a`
  *     (wiki/Feature-05-Enforcement.md): Seerr can't carry a decline/hold
@@ -556,7 +579,6 @@ export function validateConfig(config: Config): BootValidationError[] {
     ['SEERR_API_KEY', config.secrets.seerrApiKey],
     ['RADARR_API_KEY', config.secrets.radarrApiKey],
     ['SONARR_API_KEY', config.secrets.sonarrApiKey],
-    ['AUTHENTIK_TOKEN', config.secrets.authentikToken],
     ['SEERR_WEBHOOK_SECRET', config.secrets.seerrWebhookSecret],
   ];
   for (const [name, value] of requiredSecrets) {
@@ -572,13 +594,6 @@ export function validateConfig(config: Config): BootValidationError[] {
     errors.push({
       setting: 'ADMIN_USERS',
       message: 'must not be empty — nobody could administer the app',
-    });
-  }
-
-  if (config.upstreams.authentikUrl.trim() === '') {
-    errors.push({
-      setting: 'AUTHENTIK_URL',
-      message: 'missing — required; this app has no default identity provider to point at (see wiki/Configuration.md)',
     });
   }
 

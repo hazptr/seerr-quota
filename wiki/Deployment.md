@@ -1,10 +1,13 @@
 # Deployment
 
 This page assumes: a Docker host, a Seerr (Jellyseerr) instance already
-running, Radarr/Sonarr/Jellyfin, and an Authentik (or compatible OIDC)
-instance already gating the rest of your stack behind a reverse-proxy
-forward-auth setup. If any of those pieces don't exist yet, set them up
-first — this app is a sidecar, not a replacement for any of them.
+running, Radarr/Sonarr/Jellyfin, and a forward-auth-capable reverse proxy
+already gating the rest of your stack — in front of whatever identity
+provider you use (Authentik, Authelia, oauth2-proxy in front of any OIDC
+IdP, Pomerium, or anything else that can forward-auth and set headers). If
+any of those pieces don't exist yet, set them up first — this app is a
+sidecar, not a replacement for any of them. Since 0.2.0 this app has no
+identity-provider integration of its own at all — see §2/§3 below.
 
 ## 1. Compose
 
@@ -55,19 +58,33 @@ Notes that matter:
   `SMTP_HOST`/`SMTP_USER`/`SMTP_PASS` — join whatever network that relay is
   reachable on.
 
-## 2. Reverse proxy (forward-auth)
+## 2. Reverse proxy (forward-auth) — any IdP
 
-A vhost for `quota.example.com` (or whatever subdomain you choose), gated by
-the same forward-auth mechanism as every other protected service in your
-stack. The essentials, however your reverse proxy expresses them:
+Since 0.2.0 this app has **no identity-provider integration of its own**: it
+trusts whatever forward-auth proxy sits in front of it, reading only three
+configurable headers (`AUTH_USER_HEADER`/`AUTH_GROUPS_HEADER`/
+`AUTH_EMAIL_HEADER`, default `Remote-User`/`Remote-Groups`/`Remote-Email` —
+`wiki/Configuration.md` §Identity). A vhost for `quota.example.com` (or
+whatever subdomain you choose), gated by the same forward-auth mechanism as
+every other protected service in your stack. The essentials, however your
+reverse proxy expresses them:
 
-1. Authentik's (or your IdP's) forward-auth include/directive, applied to
-   the whole vhost.
-2. Forward `Remote-User` and `Remote-Groups` (or equivalent) headers from
-   the auth response to the upstream — **unconditionally overwritten**, so a
-   client can never forge them.
+1. Your IdP's forward-auth include/directive (Authentik outpost, Authelia,
+   oauth2-proxy's `auth_request`, ...), applied to the whole vhost.
+2. Forward the configured username/groups/email headers from the auth
+   response to the upstream — **unconditionally overwritten**, so a client
+   can never forge them. The email header is optional (used only for the
+   one-time member-resolution fallback, `wiki/Feature-01-SSO-Identity.md`);
+   leaving it unset is fine.
 3. `location = /healthz` **outside** the auth gate (so a liveness prober
    doesn't get redirected to a login page).
+
+Worked examples for three common setups live in
+[`examples/forward-auth/`](../examples/forward-auth/):
+[`authentik-outpost.nginx.snippet`](../examples/forward-auth/authentik-outpost.nginx.snippet),
+[`authelia.nginx.snippet`](../examples/forward-auth/authelia.nginx.snippet), and
+[`oauth2-proxy.nginx.snippet`](../examples/forward-auth/oauth2-proxy.nginx.snippet)
+— adapt whichever matches your IdP, or use them as a shape for a different one.
 
 For the in-Seerr quota banner (optional, `FR-BAN-*`) see
 [`examples/seerr-banner.nginx.snippet`](../examples/seerr-banner.nginx.snippet)
@@ -76,27 +93,23 @@ and [[Feature-10-In-Seerr-Banner]].
 Reload your proxy after applying (e.g. `nginx -t && nginx -s reload` inside
 the proxy container).
 
-## 3. Identity provider (Authentik or compatible)
+## 3. Member roster — comes from Seerr, not your IdP
 
-An [`examples/authentik.tf.snippet`](../examples/authentik.tf.snippet) is
-included as a terraform-shaped starting point if you manage Authentik as
-code; adapt it to however your own config is organized (or do the
-equivalent by hand in the Authentik UI).
+Since 0.2.0 the member roster is Seerr's own user list (`wiki/
+Feature-02-Account-Sync.md`) — there is no separate IdP-side entitlement
+step and no IdP credential for this app to hold at all. What you actually
+need to get a member a working dashboard:
 
-What this app needs from your IdP:
-
-1. **An application/provider entry** for `seerr-quota`, proxied the same way
-   every other forward-auth-protected app in your stack is.
-2. **Access granted** to every member who should see the quota dashboard —
-   typically "the same people who have access to Seerr."
-3. **A dedicated, read-only service credential** (`AUTHENTIK_TOKEN`). Per
-   `wiki/Feature-02-Account-Sync.md`, a read-only token in Authentik means a
-   dedicated service-account user in a group holding a role with exactly
-   three global permissions: `authentik_core.view_application`,
-   `authentik_core.view_user`, `authentik_policies.view_policybinding`. No
-   write permission anywhere — Authentik does not support scoping a token
-   more narrowly than the user it belongs to, so the user itself has to be
-   narrow.
+1. **Reverse-proxy access** to the `quota.*` vhost from §2 above — however
+   your IdP expresses "this user may reach this app" (an Authentik policy
+   binding, an Authelia access-control rule, an oauth2-proxy
+   email/group allow-list, ...), typically "the same people who have access
+   to Seerr."
+2. **A Seerr account** for that person — this app creates (or links) their
+   `member` row the next time the reconciler runs, keyed by whatever
+   username they'll actually log in with (see `wiki/Feature-02-Account-Sync.md`
+   for the exact key-derivation and the email-header fallback if the proxy's
+   username ever doesn't match Seerr's).
 
 ## 4. Seerr-side prerequisites
 

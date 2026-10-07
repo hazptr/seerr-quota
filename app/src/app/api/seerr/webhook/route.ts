@@ -2,7 +2,7 @@
  * `POST /api/seerr/webhook` — the P2-6 webhook receiver (`FR-ENF-8`,
  * `FR-SSO-7`). Exempt from `src/middleware.ts`'s `Remote-User` gate (Seerr
  * reaches this route directly over the shared Docker network, never through
- * the reverse proxy/Authentik — `wiki/Feature-01-SSO-Identity.md`
+ * the reverse proxy/forward-auth gate — `wiki/Feature-01-SSO-Identity.md`
  * "Interactions"); authenticated instead by a shared secret, presented in
  * the `X-Seerr-Webhook-Secret` header (`wiki/Deployment.md` §4: "Custom
  * Headers entry named `X-Seerr-Webhook-Secret`"), compared in constant time

@@ -69,18 +69,29 @@ describe('middleware (FR-SSO-3): mixed-case username and | / , groups resolve th
   });
 });
 
+describe('middleware — configurable header names (0.2.0, IdP-agnostic forward-auth)', () => {
+  it('AUTH_USER_HEADER/AUTH_GROUPS_HEADER override which headers are read; the default names stop being recognised', () => {
+    process.env.AUTH_USER_HEADER = 'X-Auth-Request-User';
+    process.env.AUTH_GROUPS_HEADER = 'X-Auth-Request-Groups';
+    _resetConfigCacheForTests();
+
+    expect(middleware(req('/', { 'Remote-User': 'dana' })).status).toBe(401); // default name no longer honoured
+    expect(middleware(req('/', { 'X-Auth-Request-User': 'dana' })).status).toBe(200);
+  });
+});
+
 describe('middleware (FR-SSO-4): a client-supplied Remote-User cannot escalate via a second code path', () => {
   it(
-    'src/middleware.ts reads ONLY the exact header names Remote-User/Remote-Groups — there is no fallback ' +
-      '(no X-Remote-User, no X-Forwarded-User, no cookie) a client could use to sneak identity past a correctly ' +
-      "configured nginx that only overwrites those two names. This is what FR-SSO-4 requires of the APP's code — " +
-      'nginx unconditionally overwriting Remote-User/Remote-Groups (in the reverse-proxy vhost config, ' +
-      "not this app) is the actual anti-spoofing control; this test proves the app never adds a " +
-      'second, weaker one next to it.',
+    'src/middleware.ts reads ONLY the two configured identity header NAMES (AUTH_USER_HEADER/AUTH_GROUPS_HEADER, ' +
+      'default Remote-User/Remote-Groups) — there is no fallback (no X-Remote-User, no X-Forwarded-User, no cookie, ' +
+      "no hardcoded second header name) a client could use to sneak identity past a correctly configured reverse " +
+      "proxy. This is what FR-SSO-4 requires of the APP's code — the proxy unconditionally overwriting those headers " +
+      '(in its own vhost config, not this app) is the actual anti-spoofing control; this test proves the app never ' +
+      'adds a second, weaker one next to it.',
     () => {
       const source = fs.readFileSync(path.join(process.cwd(), 'src/middleware.ts'), 'utf-8');
-      const headerReads = [...source.matchAll(/req\.headers\.get\((['"`])([^'"`]+)\1\)/g)].map((m) => m[2]);
-      expect(headerReads.sort()).toEqual(['Remote-Groups', 'Remote-User']);
+      const headerReads = [...source.matchAll(/req\.headers\.get\(([^)]+)\)/g)].map((m) => m[1].trim());
+      expect(headerReads.sort()).toEqual(['identityConfig.groupsHeader', 'identityConfig.userHeader']);
     },
   );
 

@@ -18,7 +18,7 @@ which.
 3. **[[Features]]** — the index of the nine features, their requirement-ID
    prefixes, and how they compose.
 4. **[[Configuration]]** — every setting, its default, and where it's read from.
-5. **[[Deployment]]** — compose, nginx, Authentik/terraform, Gatus, backups.
+5. **[[Deployment]]** — compose, nginx, forward-auth (any IdP), Gatus, backups.
 6. **[[Backlog]]** — the ordered build plan, in four phases.
 
 ## The nine features
@@ -50,9 +50,10 @@ which.
 
 ## Terminology
 
-- **Operator** — the Authentik admin / Seerr admin / server owner running the
-  deployment, identified via `ADMIN_USERS` or `ADMIN_GROUP`.
-- **Member** — any other Authentik user with the Seerr service binding.
+- **Operator** — the Seerr admin / server owner running the deployment,
+  identified via `ADMIN_USERS` or `ADMIN_GROUP`.
+- **Member** — any other Seerr user (0.2.0 — the member roster comes from
+  Seerr's own user list, not a separate identity-provider entitlement check).
 - **Attribution** — the mapping from bytes on disk to the member(s) responsible
   for them. The core concept of this project; defined in [[Feature-03-Usage-Accounting]].
 - **Claim** — one member's share of one title. Releasing a claim is not the same

@@ -2,7 +2,8 @@
 
 A per-user **disk quota, self-service cleanup, and audit** sidecar for
 [Seerr](https://github.com/sct/overseerr) / [Jellyseerr](https://github.com/Fallenbagel/jellyseerr), backed by Radarr, Sonarr,
-Jellyfin, and Authentik.
+and Jellyfin. Works behind any forward-auth-capable reverse proxy/IdP setup —
+it has no identity-provider integration of its own.
 
 Seerr can throttle *how many* things someone requests. It has no concept of
 *how much disk* those requests consume, no way for a user to reclaim their own
@@ -30,11 +31,13 @@ Jellyfin stay the source of truth for requests, library, and playback.
   never a background job (see [`AGENTS.md`](AGENTS.md) rule 2/3).
 - **Audit log.** An append-only record of every approve, decline, quota
   change, and deletion — including every denial.
-- **Operator dashboard.** Quotas, drift between the identity provider and
-  Seerr accounts, sync health, and the full audit log in one place.
-- **SSO.** Gated by an Authentik (or any OIDC-compatible) forward-auth
-  reverse-proxy setup, the same way the rest of a self-hosted stack typically
-  is.
+- **Operator dashboard.** Quotas, sync health, and the full audit log in one
+  place.
+- **SSO.** Gated by any forward-auth reverse-proxy setup (Authentik,
+  Authelia, oauth2-proxy in front of any OIDC IdP, Pomerium, ...) — the same
+  way the rest of a self-hosted stack typically is. This app has no
+  identity-provider integration of its own; the member roster comes from
+  Seerr's own user list.
 - **Theming.** A Seerr-matched default (dark + light), fully re-themeable at
   runtime via `THEME_CSS` — no rebuild required.
 
@@ -54,8 +57,9 @@ Jellyfin stay the source of truth for requests, library, and playback.
 
 - A running Seerr (or Jellyseerr) instance, with Radarr, Sonarr, and
   Jellyfin behind it.
-- An Authentik (or other OIDC-compatible) instance already gating the rest
-  of your stack behind a reverse-proxy forward-auth setup.
+- A forward-auth-capable reverse proxy already gating the rest of your
+  stack, in front of whatever identity provider you use (Authentik,
+  Authelia, oauth2-proxy, Pomerium, or anything else that can forward-auth).
 - Docker + Docker Compose on the host.
 
 If any of those pieces don't exist yet, set them up first — this app is a
@@ -78,8 +82,7 @@ services:
     user: "${PUID:-1000}:${PGID:-1000}"
     env_file: .env
     environment:
-      ADMIN_USERS: "your-sso-username"
-      AUTHENTIK_URL: "https://auth.example.com"
+      ADMIN_USERS: "your-login-username"
       APP_URL: "https://quota.example.com"
     volumes:
       - ./data/db:/db
@@ -97,12 +100,14 @@ refuses to start and tells you exactly which one is missing).
 ## Reverse proxy / SSO
 
 This app expects to sit behind a forward-auth reverse proxy that resolves
-identity and injects `Remote-User` / `Remote-Groups` headers — it has no
-login system of its own, and treats a request with no `Remote-User` as
-unauthenticated even on the loopback port. See
-[`wiki/Deployment.md`](wiki/Deployment.md) for worked examples with SWAG/
-nginx and Authentik (Traefik works the same way, with its own forward-auth
-middleware).
+identity and injects configurable headers (default `Remote-User` /
+`Remote-Groups` / `Remote-Email`) — it has no login system, and no
+identity-provider integration, of its own: it works behind ANY forward-auth
+setup (Authentik, Authelia, oauth2-proxy in front of any OIDC IdP, Pomerium,
+...), and treats a request with no username header as unauthenticated even
+on the loopback port. See [`wiki/Deployment.md`](wiki/Deployment.md) and
+[`examples/forward-auth/`](examples/forward-auth/) for worked examples per
+proxy (Traefik works the same way, with its own forward-auth middleware).
 
 ## Theming
 
@@ -143,8 +148,10 @@ to (deletion safety, append-only audit, fail-open enforcement, and more).
   always human-initiated, always multi-step, always audited. There is no
   automatic age-out here — that's deliberately left to a separate tool (e.g.
   Maintainerr) if you want one.
-- **Your identity provider is the source of truth.** This app never invents
-  an account or a permission.
+- **Seerr is the member-roster source of truth.** This app never invents an
+  account or a permission; login identity comes from whatever forward-auth
+  proxy/IdP you've configured, and the member roster comes from Seerr's own
+  user list.
 - **No rollback by design.** This app assumes it runs in a real deployment
   with no staging environment — see [`AGENTS.md`](AGENTS.md) for the
   engineering rules that follow from that.

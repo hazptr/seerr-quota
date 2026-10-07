@@ -92,12 +92,11 @@ why `FR-ADM-2`/`FR-ADM-3` forbid summing the column.
   (with a reason) and unprotect it. Both are audited.
 - **FR-ADM-8** — The operator MUST be able to manually approve or decline any
   pending request, and to re-run a decision (`FR-ENF-11`).
-- **FR-ADM-9** — The dashboard MUST surface any mismatch between the set of
-  Authentik users entitled to `SEERR_APP_SLUG` and those entitled to this app's
-  own slug (`SELF_APP_SLUG`, default `seerr-quota` — a config value, not a
-  hardcoded constant),
-  since a member who can request but can't reach this app has no way to
-  self-serve (see [[Feature-01-SSO-Identity]] open question).
+- **FR-ADM-9** *(Removed in 0.2.0)* — surfaced a mismatch between Authentik's
+  `jellyseerr` entitlement and this app's own Authentik application
+  entitlement. Removed along with the Authentik integration: the member
+  roster is Seerr's own user list now (`wiki/Feature-02-Account-Sync.md`),
+  so there is no second entitlement list left to drift from.
 - **FR-ADM-10** — The operator MUST be able to trigger an immediate reconcile
   and see per-step results from the last `sync_run`.
 - **FR-ADM-11** — The operator MUST be able to toggle `enforcement_enabled` and

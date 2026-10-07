@@ -3,7 +3,7 @@
  * is exempt from FR-SSO-2 — "Seerr can't authenticate through the gate":
  * Seerr reaches this app directly over the shared Docker network
  * (`http://seerr-quota:3000/api/seerr/webhook`), never traversing the
- * reverse-proxy/Authentik vhost at all (wiki/Feature-01-SSO-Identity.md
+ * reverse-proxy/forward-auth vhost at all (wiki/Feature-01-SSO-Identity.md
  * "Interactions").
  * In its place, the route MUST require a shared secret presented as a
  * header, compared in constant time; a missing/wrong secret MUST 401 and

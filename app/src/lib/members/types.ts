@@ -1,5 +1,5 @@
 /**
- * Domain types for account-sync reconciliation (`wiki/Feature-02-Account-Sync.md`,
+ * Domain types for account sync (`wiki/Feature-02-Account-Sync.md`,
  * `wiki/Data-Model.md` §member). Kept separate from `classify.ts` so
  * `src/lib/members/sync.ts` (the DB-touching shell) can import just the
  * shapes it needs without pulling in the classification algorithm.
@@ -11,12 +11,14 @@ export type SyncStatus = 'matched' | 'no_seerr_account' | 'not_entitled' | 'ambi
 /**
  * A `member` row as it exists in the DB BEFORE this sync cycle runs —
  * `classifyMembers` (`./classify.ts`) is pure, so this is how it learns
- * "who did we already know about" (to carry forward `first_seen_at`, detect
- * a newly-lost entitlement, and decide `isNew`) without touching the
+ * "who did we already know about" (to carry forward `first_seen_at`, find
+ * the existing row already linked to a given Seerr user id for key
+ * stability, and detect a newly-lost Seerr account) without touching the
  * database itself.
  */
 export interface ExistingMemberSnapshot {
   ssoUsername: string;
+  /** DEPRECATED (0.2.0) — no longer written; carried forward as-is. See `src/lib/db/schema.ts`'s column comment. */
   authentikUuid: string | null;
   displayName: string | null;
   email: string | null;
@@ -26,7 +28,7 @@ export interface ExistingMemberSnapshot {
   syncStatus: SyncStatus;
   syncNote: string | null;
   firstSeenAt: number;
-  /** `admins` group / `ADMIN_USERS` (`FR-ENF-6`). Carried forward as-is for a member outside the currently-entitled set — see `classify.ts`'s header comment on why group data can't be freshly re-verified for that group of members. */
+  /** `ADMIN_USERS` (`FR-ENF-6`, background half — see `classify.ts`'s header comment). */
   isOperator: boolean;
 }
 
@@ -37,6 +39,7 @@ export interface ExistingMemberSnapshot {
  */
 export interface ClassifiedMember {
   ssoUsername: string;
+  /** DEPRECATED (0.2.0) — never set for a new row; carried forward for an existing one. */
   authentikUuid: string | null;
   displayName: string | null;
   email: string | null;

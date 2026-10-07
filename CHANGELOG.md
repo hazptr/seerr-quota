@@ -7,12 +7,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
+### Added (0.2.0)
 
+- **IdP-agnostic forward-auth.** The app no longer has any Authentik-specific
+  integration — it works behind any forward-auth reverse proxy (Authentik,
+  Authelia, oauth2-proxy in front of any OIDC IdP, Pomerium, ...). Identity
+  header names are now configurable: `AUTH_USER_HEADER` (default
+  `Remote-User`), `AUTH_GROUPS_HEADER` (default `Remote-Groups`),
+  `AUTH_EMAIL_HEADER` (default `Remote-Email`, optional).
+- **Login → member resolution fallback.** If a forward-auth login username
+  doesn't exactly match an existing member, and the proxy supplies an email
+  header matching EXACTLY ONE entitled member, that member is resolved and
+  the login username is recorded as a `login_alias` (first time only,
+  audited as `member.alias_linked`) so future logins resolve instantly.
+  Zero or ambiguous (>1) matches refuse rather than guess.
+- Three worked forward-auth examples in `examples/forward-auth/`: Authentik
+  outpost, Authelia, and oauth2-proxy (nginx), replacing
+  `examples/authentik.tf.snippet`.
+- Additive schema: `member.login_alias` (nullable, unique when set).
+
+### Changed (0.2.0)
+
+- **Member roster is now Seerr's own user list.** Every current Seerr user
+  is a member (`entitled = true`). There is no second, independent
+  identity-provider entitlement list to reconcile against any more.
+- **Member key stability.** An existing member already linked to a Seerr
+  account (`seerr_user_id` set) keeps its `sso_username` forever, even if
+  Seerr's own username/email for that account changes — re-matched by
+  `seerr_user_id`, never re-derived. Only a genuinely new Seerr account gets
+  a freshly-derived key.
+- **Operator semantics.** Request-time operator status is `ADMIN_USERS`
+  (checked against both the resolved member key and the raw header
+  username) OR `ADMIN_GROUP` membership via the groups header — unchanged.
+  The BACKGROUND enforcement-exemption flag (`member.is_operator`) is now
+  `ADMIN_USERS` ONLY, since no groups header exists off-request. An
+  `ADMIN_GROUP`-only admin therefore stays subject to quota enforcement
+  unless also listed in `ADMIN_USERS` or given an unlimited override.
 - Dependencies: Next.js 15.5.27, better-sqlite3 13 (Node-API prebuilt
   binaries), nodemailer 10, drizzle-kit 0.31.11, postcss 8.5.28,
   autoprefixer 10.6.1, eslint-config-next 15.5.27.
 - Build uses npm 11 (Docker `deps` stage and CI).
+
+### Removed (0.2.0)
+
+- The entire Authentik integration: `src/lib/authentik/**` (admin API
+  client), the member-sync identity step, the admin "entitlement check"
+  panel (`FR-ADM-9`), and the `AUTHENTIK_URL` / `AUTHENTIK_TOKEN` /
+  `SEERR_APP_SLUG` / `SELF_APP_SLUG` / `AUTHENTIK_JELLYSEERR_APP_UUID`
+  settings.
+
+### Breaking / Upgrade notes (0.2.0)
+
+- **Authentik env vars removed.** `AUTHENTIK_URL`, `AUTHENTIK_TOKEN`,
+  `SEERR_APP_SLUG`, `SELF_APP_SLUG`, and `AUTHENTIK_JELLYSEERR_APP_UUID` no
+  longer do anything. Leaving them set in an existing deployment's `.env`
+  does NOT break boot — one deprecation line naming them (never their
+  values) is logged once at startup, then they're ignored.
+- **Roster source changed.** The member roster now comes directly from
+  Seerr instead of from Authentik-entitlement ∩ Seerr-match. A member whose
+  Seerr account has since been deleted becomes `entitled = false` /
+  `not_entitled` on the next reconcile (their row, claims, quota, and audit
+  history are all kept — nothing is deleted).
+- **Existing member keys are preserved.** No existing `member.sso_username`
+  is changed or re-derived by this upgrade — every row already linked to a
+  Seerr account (`seerr_user_id` set) keeps its exact login key.
+- **New: email-header fallback.** If your forward-auth proxy sends an email
+  header (`AUTH_EMAIL_HEADER`, default `Remote-Email`) and a login username
+  changes (e.g. you switch IdPs, or rename accounts), a member whose email
+  matches exactly one existing entitled member resolves automatically and
+  gets a `login_alias` recorded — no manual DB edit needed. This is OPT-IN
+  in effect: with no email header sent, behaviour is unchanged from before.
+- **Operator semantics clarified, not changed in the common case.**
+  `ADMIN_USERS` continues to work exactly as before. If you were relying on
+  `ADMIN_GROUP` ALONE (not also in `ADMIN_USERS`) for the background
+  enforcement exemption, that exemption no longer applies — add that
+  username to `ADMIN_USERS`, or set an explicit unlimited quota override, if
+  you need it to continue.
+- **Deploying behind a non-Authentik proxy** now needs no code change at
+  all — just point `AUTH_USER_HEADER`/`AUTH_GROUPS_HEADER`/
+  `AUTH_EMAIL_HEADER` at whatever your proxy sets (defaults already match
+  Authentik's forward-auth convention, so an existing Authentik deployment
+  needs no `.env` change here either).
 
 ## [0.1.0] — 2026-10-07
 

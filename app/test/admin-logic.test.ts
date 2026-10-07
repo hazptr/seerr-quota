@@ -7,7 +7,6 @@ import {
   deriveMemberState,
   derivePercentUsed,
   describeDecision,
-  diffEntitlement,
   estimateRunwayDays,
   formatRunway,
   groupSkipsByReason,
@@ -251,26 +250,6 @@ describe('groupSkipsByReason — the five reasons stay distinct, never collapsed
 
   it('an empty list yields an empty array, not a zero-count placeholder', () => {
     expect(groupSkipsByReason([])).toEqual([]);
-  });
-});
-
-describe('diffEntitlement (FR-ADM-9)', () => {
-  it('finds users entitled to jellyseerr but not to seerr-quota (the harmful direction)', () => {
-    const diff = diffEntitlement(['frank', 'erin', 'dana'], ['frank', 'erin']);
-    expect(diff.entitledToSeerrOnly).toEqual(['dana']);
-    expect(diff.entitledToQuotaOnly).toEqual([]);
-  });
-  it('finds the reverse mismatch too', () => {
-    const diff = diffEntitlement(['frank'], ['frank', 'ghost']);
-    expect(diff.entitledToQuotaOnly).toEqual(['ghost']);
-  });
-  it('is case-insensitive', () => {
-    const diff = diffEntitlement(['Frank'], ['frank']);
-    expect(diff.entitledToSeerrOnly).toEqual([]);
-    expect(diff.entitledToQuotaOnly).toEqual([]);
-  });
-  it('identical sets -> no mismatch', () => {
-    expect(diffEntitlement(['a', 'b'], ['b', 'a'])).toEqual({ entitledToSeerrOnly: [], entitledToQuotaOnly: [] });
   });
 });
 

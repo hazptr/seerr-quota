@@ -3,7 +3,7 @@
  * "MUST be cheap ... served from the last attribution snapshot, no upstream
  * calls, no recomputation. It is hit on every Seerr page load by every
  * user." Three tiny, indexed reads against tables the reconciler already
- * maintains — no Seerr/Radarr/Sonarr/Jellyfin/Authentik call, and no
+ * maintains — no Seerr/Radarr/Sonarr/Jellyfin call, and no
  * re-running of `@/lib/attribution/compute.ts`'s attribution algorithm:
  *
  *   - `usageBytes`  — `SUM(claim.charged_bytes)` over this member's own

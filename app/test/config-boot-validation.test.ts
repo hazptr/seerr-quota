@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { assertBootValid, checkDbPathWritable, resolveConfig, validateConfig } from '@/lib/config';
+import { assertBootValid, checkDbPathWritable, detectLegacyAuthentikEnv, resolveConfig, validateConfig } from '@/lib/config';
 
 /** A config with every required secret set and no other violations — the happy path other tests mutate from. */
 function validEnv(overrides: Record<string, string | undefined> = {}) {
@@ -11,10 +11,8 @@ function validEnv(overrides: Record<string, string | undefined> = {}) {
     RADARR_API_KEY: 'rk',
     SONARR_API_KEY: 'sok',
     JELLYFIN_API_KEY: 'jk',
-    AUTHENTIK_TOKEN: 'ak',
     SEERR_WEBHOOK_SECRET: 'wk',
     ADMIN_USERS: 'admin',
-    AUTHENTIK_URL: 'https://auth.example.com',
     APP_URL: 'https://quota.example.com',
     ...overrides,
   };
@@ -32,7 +30,6 @@ describe('validateConfig — wiki/Configuration.md §"Validation at boot"', () =
       'SEERR_API_KEY',
       'RADARR_API_KEY',
       'SONARR_API_KEY',
-      'AUTHENTIK_TOKEN',
       'SEERR_WEBHOOK_SECRET',
     ] as const) {
       const cfg = resolveConfig(validEnv({ [key]: undefined }));
@@ -78,12 +75,6 @@ describe('validateConfig — wiki/Configuration.md §"Validation at boot"', () =
     expect(cfg.identity.adminUsers).toEqual([]);
     const errors = validateConfig(cfg);
     expect(errors.some((e) => e.setting === 'ADMIN_USERS')).toBe(true);
-  });
-
-  it('rejects AUTHENTIK_URL missing — no sane generic default exists for a deployment-specific identity provider', () => {
-    const cfg = resolveConfig(validEnv({ AUTHENTIK_URL: undefined }));
-    expect(cfg.upstreams.authentikUrl).toBe('');
-    expect(validateConfig(cfg).map((e) => e.setting)).toContain('AUTHENTIK_URL');
   });
 
   it('rejects APP_URL missing — no sane generic default exists for this app\'s own public URL', () => {
@@ -248,5 +239,31 @@ describe('assertBootValid', () => {
       expect(message).toContain('SEERR_API_KEY');
       expect(message).toContain('ADMIN_USERS');
     }
+  });
+});
+
+describe('detectLegacyAuthentikEnv (0.2.0 config contract: a leftover .env MUST NOT fail to boot)', () => {
+  it('returns [] when no removed Authentik var is present', () => {
+    expect(detectLegacyAuthentikEnv(validEnv())).toEqual([]);
+  });
+
+  it('names every removed Authentik var still present and non-empty, never its value', () => {
+    const names = detectLegacyAuthentikEnv({
+      AUTHENTIK_URL: 'https://auth.example.com',
+      AUTHENTIK_TOKEN: 'super-secret-token',
+      SEERR_APP_SLUG: 'jellyseerr',
+    });
+    expect(names.sort()).toEqual(['AUTHENTIK_TOKEN', 'AUTHENTIK_URL', 'SEERR_APP_SLUG']);
+    expect(names.join(',')).not.toContain('super-secret-token');
+  });
+
+  it('an empty-string value is treated as unset, same as everywhere else', () => {
+    expect(detectLegacyAuthentikEnv({ AUTHENTIK_URL: '' })).toEqual([]);
+  });
+
+  it('a fully-valid 0.2.0 env with legacy Authentik vars left over still boots clean (resolveConfig/validateConfig never read them)', () => {
+    const cfg = resolveConfig(validEnv({ AUTHENTIK_URL: 'https://auth.example.com', AUTHENTIK_TOKEN: 'leftover-secret' }));
+    expect(validateConfig(cfg)).toEqual([]);
+    expect(JSON.stringify(cfg)).not.toContain('leftover-secret');
   });
 });

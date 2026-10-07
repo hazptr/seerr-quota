@@ -1,0 +1,51 @@
+# seerr-quota — forward-auth example: Authentik embedded outpost (nginx/SWAG)
+#
+# Reference text only — NOT applied automatically. This is the Authentik
+# flavour of wiki/Deployment.md's forward-auth section; adapt names/paths to
+# your own SWAG/nginx config. Since 0.2.0 this app has NO Authentik-specific
+# code at all — it only ever reads whatever headers AUTH_USER_HEADER/
+# AUTH_GROUPS_HEADER/AUTH_EMAIL_HEADER are configured to (defaults
+# Remote-User/Remote-Groups/Remote-Email), so this snippet is just "how to
+# get Authentik to populate those three headers," nothing seerr-quota-specific.
+#
+# Assumes SWAG's bundled `authentik-server.conf` / `authentik-location.conf`
+# includes (or your own equivalent forward-auth location block hitting
+# Authentik's embedded outpost `/outpost.goauthentik.io/auth/nginx`).
+
+server {
+    listen 443 ssl;
+    server_name quota.*;
+    include /config/nginx/ssl.conf;
+    include /config/nginx/authentik-server.conf;
+
+    # Unauthenticated liveness for Gatus (FR-SSO-6) — must BYPASS the gate.
+    location = /healthz {
+        include /config/nginx/proxy.conf;
+        include /config/nginx/resolver.conf;
+        set $upstream_app seerr-quota;
+        set $upstream_port 3000;
+        set $upstream_proto http;
+        proxy_pass $upstream_proto://$upstream_app:$upstream_port;
+    }
+
+    location / {
+        include /config/nginx/authentik-location.conf;
+        # The three headers this app reads — names match its defaults
+        # (AUTH_USER_HEADER/AUTH_GROUPS_HEADER/AUTH_EMAIL_HEADER). Change the
+        # proxy_set_header NAME here (left-hand side) if you've configured
+        # this app with different header names; $authentik_* are Authentik's
+        # own nginx variables, set by the included forward-auth location.
+        proxy_set_header Remote-User   $authentik_username;
+        proxy_set_header Remote-Groups $authentik_groups;
+        proxy_set_header Remote-Email  $authentik_email;
+        include /config/nginx/proxy.conf;
+        include /config/nginx/resolver.conf;
+        set $upstream_app seerr-quota;
+        set $upstream_port 3000;
+        set $upstream_proto http;
+        proxy_pass $upstream_proto://$upstream_app:$upstream_port;
+    }
+}
+
+# The Seerr webhook does NOT traverse this vhost — Seerr reaches the app
+# directly over the shared Docker network (FR-SSO-7); see wiki/Deployment.md.

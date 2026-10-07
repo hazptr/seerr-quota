@@ -6,7 +6,10 @@ Humans should start at [README.md](README.md) and [`wiki/Home.md`](wiki/Home.md)
 ## What this is
 
 A per-user **disk quota, self-service cleanup, and audit** sidecar for Seerr
-(Jellyseerr). It also talks to Radarr, Sonarr, Jellyfin, and Authentik. See
+(Jellyseerr). It also talks to Radarr, Sonarr, and Jellyfin, and sits behind
+whatever forward-auth reverse proxy/IdP your deployment uses (it has no
+identity-provider integration of its own — see
+[`wiki/Feature-01-SSO-Identity.md`](wiki/Feature-01-SSO-Identity.md)). See
 [`wiki/Backlog.md`](wiki/Backlog.md) for the current build status and open
 decisions. The `wiki/` is the source of truth for every requirement, default,
 and decision; where the code and the wiki disagree, that is a bug in one of

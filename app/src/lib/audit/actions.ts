@@ -29,6 +29,15 @@ export type AuditAction =
   | 'member.created'
   | 'member.sync_changed'
   | 'member.entitlement_changed'
+  /**
+   * 0.2.0, `src/lib/auth/memberGate.ts`: the FIRST time a forward-auth login
+   * username is resolved to an existing member via the email-header
+   * fallback (no `sso_username` match), recording that username as the
+   * member's `login_alias` so future logins resolve by alias directly.
+   * `target_id` is the member's `sso_username`; `detail` carries the
+   * resolved alias.
+   */
+  | 'member.alias_linked'
   | 'quota.set'
   | 'quota.cleared'
   | 'setting.changed'
@@ -73,6 +82,7 @@ export const AUDIT_ACTIONS = [
   'member.created',
   'member.sync_changed',
   'member.entitlement_changed',
+  'member.alias_linked',
   'quota.set',
   'quota.cleared',
   'setting.changed',

@@ -1,6 +1,6 @@
 /**
- * Small "who's signed in" readout for `AppShell`'s header — the raw
- * `Remote-User` value as Authentik sent it (`identity.displayUsername`,
+ * Small "who's signed in" readout for `AppShell`'s header — the raw forward-auth
+ * username header value as the reverse proxy sent it (`identity.displayUsername`,
  * casing preserved, DISPLAY ONLY per `@/lib/auth/identity.ts`'s header
  * comment: never compared or looked up by), plus an "operator" tag when
  * applicable. Server component — no client JS needed, so it renders with

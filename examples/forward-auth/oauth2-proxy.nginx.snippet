@@ -1,0 +1,50 @@
+# seerr-quota — forward-auth example: oauth2-proxy in front of any OIDC IdP (nginx)
+#
+# Reference text only — NOT applied automatically. oauth2-proxy's own
+# `auth_request` integration returns `X-Auth-Request-User` /
+# `X-Auth-Request-Email` / `X-Auth-Request-Groups` from its `/oauth2/auth`
+# endpoint (enable `--set-xauthrequest` and, for groups, `--set-authorization-header`
+# or `--pass-user-headers` per oauth2-proxy's own docs for the IdP you've
+# pointed it at). This snippet maps THOSE onto the headers seerr-quota reads
+# — either rename them in your `AUTH_*_HEADER` env vars to match oauth2-
+# proxy's names directly, or (as shown here) proxy_set_header a rename so
+# you can keep this app's defaults.
+
+server {
+    listen 443 ssl;
+    server_name quota.*;
+    include /etc/nginx/ssl.conf;
+
+    # Unauthenticated liveness for Gatus (FR-SSO-6) — must BYPASS the gate.
+    location = /healthz {
+        proxy_pass http://seerr-quota:3000;
+    }
+
+    location = /oauth2/auth {
+        internal;
+        proxy_pass       http://oauth2-proxy:4180;
+        proxy_set_header  Host             $host;
+        proxy_set_header  X-Real-IP        $remote_addr;
+        proxy_set_header  X-Scheme         $scheme;
+        proxy_set_header  Content-Length   "";
+        proxy_pass_request_body off;
+    }
+
+    location / {
+        auth_request /oauth2/auth;
+        auth_request_set $oauth2_user   $upstream_http_x_auth_request_user;
+        auth_request_set $oauth2_email  $upstream_http_x_auth_request_email;
+        auth_request_set $oauth2_groups $upstream_http_x_auth_request_groups;
+        error_page 401 = /oauth2/sign_in;
+
+        # Map oauth2-proxy's own header names onto the three this app reads
+        # (defaults — rename both sides if you've changed AUTH_*_HEADER).
+        proxy_set_header Remote-User   $oauth2_user;
+        proxy_set_header Remote-Groups $oauth2_groups;
+        proxy_set_header Remote-Email  $oauth2_email;
+        proxy_pass http://seerr-quota:3000;
+    }
+}
+
+# The Seerr webhook does NOT traverse this vhost — Seerr reaches the app
+# directly over the shared Docker network (FR-SSO-7); see wiki/Deployment.md.

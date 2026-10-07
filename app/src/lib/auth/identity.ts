@@ -1,22 +1,26 @@
 /**
  * Pure identity-resolution logic for Feature 1 (SSO & Identity,
  * wiki/Feature-01-SSO-Identity.md, FR-SSO-2/3/4). No I/O, no Next.js imports:
- * takes the raw `Remote-User` / `Remote-Groups` header values (as a reverse
- * proxy's — e.g. SWAG, Traefik — Authentik forward-auth location injects
- * them, see the wiki's "Interactions" nginx snippet) plus the configured
- * operator allowlist/group, and returns a typed `Identity` or `null`. The
- * impure shells — `src/middleware.ts` (the gate) and
+ * takes the raw forward-auth header values (whatever a reverse proxy's —
+ * e.g. SWAG, Traefik — forward-auth location injects for the IdP in front of
+ * it: Authentik, Authelia, oauth2-proxy, Pomerium, ... see the wiki's
+ * "Interactions" nginx snippet and `examples/forward-auth/`) plus the
+ * configured operator allowlist/group, and returns a typed `Identity` or
+ * `null`. The impure shells — `src/middleware.ts` (the gate) and
  * `src/lib/auth/session.ts` (the per-request re-read for pages/routes) —
  * both call this same function, so there is exactly one implementation of
  * "what do these headers mean" (AGENTS.md rule 9, pure core / impure shell).
  *
- * This module has no fallback header name and no alternate identity source
- * (no cookie, no query param) — `Remote-User`/`Remote-Groups` are the ONLY
- * inputs it ever reads (FR-SSO-4: the app must not treat anything else as
- * authoritative). The actual anti-spoofing boundary is outside this app
- * entirely: the reverse proxy's Authentik forward-auth location block
- * unconditionally overwrites any client-sent copy of these two headers
- * before proxying (wiki/Feature-01-SSO-Identity.md "Interactions"), and the
+ * This module has no alternate identity source (no cookie, no query param)
+ * — the configured username/groups headers (`AUTH_USER_HEADER`/
+ * `AUTH_GROUPS_HEADER`, default `Remote-User`/`Remote-Groups` — the HEADER
+ * NAMES are resolved by the caller from `getConfig().identity`, not by this
+ * module) are the ONLY inputs it ever reads (FR-SSO-4: the app must not
+ * treat anything else as authoritative). The actual anti-spoofing boundary
+ * is outside this app entirely: the reverse proxy's forward-auth location
+ * block unconditionally overwrites any client-sent copy of these headers
+ * before proxying (wiki/Feature-01-SSO-Identity.md "Interactions"; the proxy
+ * MUST do this on every request, whichever IdP sits behind it), and the
  * container's loopback-only bind stops the LAN from reaching the app around
  * that gate.
  * This module — and every caller of it — has no way to distinguish a

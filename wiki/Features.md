@@ -8,8 +8,8 @@ problem, and owns only what none of them do.
 
 | # | Feature | Intent | Prefix | Heavy lifting |
 |---|---|---|---|---|
-| 1 | [[Feature-01-SSO-Identity]] | Same login as every other service | `SSO` | Authentik forward-auth (reverse proxy) |
-| 2 | [[Feature-02-Account-Sync]] | Authentik ↔ Seerr accounts reconciled, drift surfaced | `SYNC` | Authentik + Seerr APIs |
+| 1 | [[Feature-01-SSO-Identity]] | Same login as every other service | `SSO` | Any forward-auth reverse proxy/IdP (0.2.0: no IdP integration of its own) |
+| 2 | [[Feature-02-Account-Sync]] | Member roster, from Seerr's own user list | `SYNC` | Seerr API |
 | 3 | [[Feature-03-Usage-Accounting]] | Turn "requests" into "bytes this person is responsible for" | `ACCT` | **This app** (the join Seerr can't do) |
 | 4 | [[Feature-04-Quota-Policy]] | A size quota per person, set by the operator | `POL` | **This app** |
 | 5 | [[Feature-05-Enforcement]] | Over quota ⇒ new requests **held**, with an obvious reason | `ENF` | Seerr approval API + **this app's** decision fn |
@@ -24,8 +24,8 @@ problem, and owns only what none of them do.
 ```
  login ──► SSO (1) says who you are
    │
-   └─► Account Sync (2) maps you: Authentik → Jellyfin → Seerr
-         │      (operator sees anyone who doesn't map)
+   └─► Account Sync (2) creates/links your member row from Seerr's user list
+         │      (operator sees anyone not yet matched)
          │
          ├─► Quota Policy (4) says how many bytes you get
          └─► Usage Accounting (3) says how many you're using
@@ -74,8 +74,8 @@ Every feature page uses the same layout:
 
 ## Roles
 
-- **Member** — any Authentik user with the `jellyseerr` binding who isn't the
-  operator. Sees only their own data.
+- **Member** — any Seerr user (0.2.0) who isn't the operator. Sees only their
+  own data.
 - **Operator** — `admin`. Sees and sets everything; exempt from enforcement.
 - **System** — the reconciler and webhook receiver acting without a human.
 

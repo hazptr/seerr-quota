@@ -26,8 +26,9 @@
  * downstream.
  *
  * FR-SSO-4's actual anti-spoofing protection lives OUTSIDE this app: a
- * reverse proxy (e.g. SWAG, Traefik) running an Authentik forward-auth
- * location block overwrites any client-sent `Remote-User`/`Remote-Groups`
+ * reverse proxy (e.g. SWAG, Traefik) running a forward-auth location block
+ * (for Authentik, Authelia, oauth2-proxy, Pomerium, or any other IdP)
+ * overwrites any client-sent copy of the configured identity headers
  * before proxying (wiki/Feature-01-SSO-Identity.md "Interactions" —
  * `proxy_set_header` is unconditional), and
  * the container's loopback-only bind stops the LAN from reaching the app
@@ -59,8 +60,8 @@ export function middleware(req: NextRequest): NextResponse {
   const { identity: identityConfig } = getConfig();
 
   const identity = resolveIdentity(
-    req.headers.get('Remote-User'),
-    req.headers.get('Remote-Groups'),
+    req.headers.get(identityConfig.userHeader),
+    req.headers.get(identityConfig.groupsHeader),
     identityConfig.adminUsers,
     identityConfig.adminGroup,
   );
@@ -82,7 +83,7 @@ export const config = {
    *     test/healthz.test.ts).
    *   - /api/seerr/webhook (and /api/seerr/webhook/...) — FR-SSO-7. Seerr
    *     reaches this route directly over the shared Docker network, never
-   *     traversing the reverse-proxy/Authentik vhost, so it can never
+   *     traversing the reverse-proxy/forward-auth vhost, so it can never
    *     present a `Remote-User` header. The route itself (P2-6, not built
    *     here) authenticates via a constant-time shared-secret comparison
    *     instead — see src/lib/auth/webhookSecret.ts.
