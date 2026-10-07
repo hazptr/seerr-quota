@@ -1,0 +1,42 @@
+{
+  "note": "Wholly SYNTHETIC fixture for the attribution-snapshot-correctness test. Every id, title, username, and timestamp below is fabricated — none of it is derived from or resembles any real production data. It exercises the same signal analysis/attribution.py's reference 'full charge' model uses: title resolution + actual on-disk size, nothing else. Every request's requestStatus is fixed to COMPLETED by the test's loader (this fixture carries no per-request status field), matching the reference model, which never reads request/media status at all.",
+  "titles": [
+    { "id": "movie:901", "mediaType": "movie", "tmdbId": 900001, "tvdbId": null, "sizeBytes": 5000000000, "lastSyncedAt": 1893456000 },
+    { "id": "movie:902", "mediaType": "movie", "tmdbId": 900002, "tvdbId": null, "sizeBytes": 8000000000, "lastSyncedAt": 1893456000 },
+    { "id": "movie:903", "mediaType": "movie", "tmdbId": 900003, "tvdbId": null, "sizeBytes": 3500000000, "lastSyncedAt": 1893456000 },
+    { "id": "movie:904", "mediaType": "movie", "tmdbId": 900004, "tvdbId": null, "sizeBytes": 12000000000, "lastSyncedAt": 1893456000 },
+    { "id": "movie:905", "mediaType": "movie", "tmdbId": 900005, "tvdbId": null, "sizeBytes": 2000000000, "lastSyncedAt": 1893456000 },
+    { "id": "movie:906", "mediaType": "movie", "tmdbId": 900006, "tvdbId": null, "sizeBytes": 6250000000, "lastSyncedAt": 1893456000 },
+    { "id": "movie:907", "mediaType": "movie", "tmdbId": 900007, "tvdbId": null, "sizeBytes": 1250000000, "lastSyncedAt": 1893456000 },
+    { "id": "series:801", "mediaType": "tv", "tmdbId": null, "tvdbId": 900101, "sizeBytes": 50000000000, "lastSyncedAt": 1893456000 },
+    { "id": "series:802", "mediaType": "tv", "tmdbId": null, "tvdbId": 900102, "sizeBytes": 20000000000, "lastSyncedAt": 1893456000 },
+    { "id": "series:803", "mediaType": "tv", "tmdbId": null, "tvdbId": 900103, "sizeBytes": 15000000000, "lastSyncedAt": 1893456000 },
+    { "id": "series:804", "mediaType": "tv", "tmdbId": null, "tvdbId": 900104, "sizeBytes": 9000000000, "lastSyncedAt": 1893456000 },
+    { "id": "series:805", "mediaType": "tv", "tmdbId": null, "tvdbId": 900105, "sizeBytes": 30000000000, "lastSyncedAt": 1893456000 }
+  ],
+  "requests": [
+    { "seerrRequestId": 1, "username": "carol", "mediaType": "movie", "tmdbId": 900001, "tvdbId": null, "createdAt": "2030-01-02 10:00:00" },
+    { "seerrRequestId": 2, "username": "carol", "mediaType": "movie", "tmdbId": 900001, "tvdbId": null, "createdAt": "2030-01-05 11:00:00" },
+    { "seerrRequestId": 3, "username": "carol", "mediaType": "movie", "tmdbId": 900002, "tvdbId": null, "createdAt": "2030-01-07 09:30:00" },
+    { "seerrRequestId": 4, "username": "carol", "mediaType": "tv", "tmdbId": null, "tvdbId": 900102, "createdAt": "2030-01-09 14:15:00" },
+    { "seerrRequestId": 5, "username": "carol", "mediaType": "tv", "tmdbId": null, "tvdbId": 900102, "createdAt": "2030-01-10 14:20:00" },
+    { "seerrRequestId": 6, "username": "dana", "mediaType": "movie", "tmdbId": 900003, "tvdbId": null, "createdAt": "2030-01-11 08:00:00" },
+    { "seerrRequestId": 7, "username": "dana", "mediaType": "movie", "tmdbId": 900003, "tvdbId": null, "createdAt": "2030-01-12 08:05:00" },
+    { "seerrRequestId": 8, "username": "dana", "mediaType": "movie", "tmdbId": 900004, "tvdbId": null, "createdAt": "2030-01-13 16:45:00" },
+    { "seerrRequestId": 9, "username": "dana", "mediaType": "tv", "tmdbId": null, "tvdbId": 900103, "createdAt": "2030-01-14 12:00:00" },
+    { "seerrRequestId": 10, "username": "dana", "mediaType": "tv", "tmdbId": null, "tvdbId": 900103, "createdAt": "2030-01-15 12:05:00" },
+    { "seerrRequestId": 11, "username": "dana", "mediaType": "tv", "tmdbId": null, "tvdbId": 900999, "createdAt": "2030-01-16 09:00:00" },
+    { "seerrRequestId": 12, "username": "erin", "mediaType": "tv", "tmdbId": null, "tvdbId": 900101, "createdAt": "2030-01-17 20:30:00" },
+    { "seerrRequestId": 13, "username": "erin", "mediaType": "movie", "tmdbId": 900005, "tvdbId": null, "createdAt": "2030-01-18 21:00:00" },
+    { "seerrRequestId": 14, "username": "erin", "mediaType": "movie", "tmdbId": 900005, "tvdbId": null, "createdAt": "2030-01-19 21:05:00" },
+    { "seerrRequestId": 15, "username": "frank", "mediaType": "tv", "tmdbId": null, "tvdbId": 900101, "createdAt": "2030-01-20 19:00:00" },
+    { "seerrRequestId": 16, "username": "frank", "mediaType": "movie", "tmdbId": 900006, "tvdbId": null, "createdAt": "2030-01-21 07:30:00" },
+    { "seerrRequestId": 17, "username": "frank", "mediaType": "movie", "tmdbId": 900006, "tvdbId": null, "createdAt": "2030-01-22 07:35:00" },
+    { "seerrRequestId": 18, "username": "frank", "mediaType": "tv", "tmdbId": null, "tvdbId": 900104, "createdAt": "2030-01-23 23:10:00" },
+    { "seerrRequestId": 19, "username": "frank", "mediaType": "tv", "tmdbId": null, "tvdbId": 900104, "createdAt": "2030-01-24 23:15:00" },
+    { "seerrRequestId": 20, "username": "gus", "mediaType": "tv", "tmdbId": null, "tvdbId": 900105, "createdAt": "2030-01-25 18:00:00" },
+    { "seerrRequestId": 21, "username": "gus", "mediaType": "tv", "tmdbId": null, "tvdbId": 900105, "createdAt": "2030-01-26 18:05:00" },
+    { "seerrRequestId": 22, "username": "gus", "mediaType": "movie", "tmdbId": 900007, "tvdbId": null, "createdAt": "2030-01-27 13:20:00" },
+    { "seerrRequestId": 23, "username": "gus", "mediaType": "movie", "tmdbId": 900007, "tvdbId": null, "createdAt": "2030-01-28 13:25:00" }
+  ]
+}

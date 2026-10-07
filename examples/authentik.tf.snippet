@@ -1,0 +1,127 @@
+# ─────────────────────────────────────────────────────────────
+# seerr-quota — Authentik terraform additions (example, not applied)
+#
+# This file is a reference example, not live terraform — adapt the
+# resource names and the `proxy_services`/`users` shape to however your own
+# Authentik terraform config is organized. It assumes a setup broadly like
+# the one described in wiki/Deployment.md: a `local.proxy_services` map that
+# an embedded outpost + `authentik_application` resource iterate over to
+# provision one forward-auth-protected app per entry, and a per-user
+# `services` list controlling who gets a policy binding for which app.
+# If your Authentik config isn't organized that way, use this only for the
+# resource shapes (service account, RBAC role, token) and wire the
+# application/provider up however your existing config does it.
+#
+# ── Token scoping ──
+# `authentik_token` has no independent scoping: it requires a `user` arg
+# and inherits that user's permissions wholesale. "Dedicated read-only
+# service token" therefore means a dedicated service-account user with a
+# role granting exactly the global (non-object) `view_*` permissions this
+# app's account-sync needs (FR-SYNC-1..4: it reads the Seerr application,
+# the policy bindings that target it, and the active user list) — no write
+# permission anywhere. Three-resource chain: role → permission_role → group
+# → user, because the provider does not expose roles/permissions directly
+# on `authentik_user`.
+#
+# ── meta_icon GOTCHA ──
+# `icon` below is commonly a no-op on `apply` in recent Authentik
+# versions — the API marks `meta_icon` read-only via PUT/PATCH through
+# terraform. If you hit that, PATCH it directly after `terraform apply`:
+#
+#   curl -sk -X PATCH -H "Authorization: Bearer $AUTHENTIK_TOKEN" -H "Content-Type: application/json" \
+#     -d '{"meta_icon":"https://raw.githubusercontent.com/walkxcode/dashboard-icons/main/png/seerr.png"}' \
+#     "https://auth.example.com/api/v3/core/applications/seerr-quota/"
+# ─────────────────────────────────────────────────────────────
+
+# ═══ 1. Add an entry to your existing `proxy_services`-style map ═══
+
+# seerr_quota = {
+#   name          = "Seerr Quota"
+#   external_host = "https://quota.${var.domain}"
+#   internal_host = "http://seerr-quota:3000"
+#   icon          = "https://raw.githubusercontent.com/walkxcode/dashboard-icons/main/png/seerr.png"
+# }
+
+# ═══ 2 + 3. Service account, RBAC read-only role, API token ═══
+
+resource "authentik_user" "seerr_quota_svc" {
+  username = "seerr-quota-svc"
+  name     = "Seerr Quota Service Account"
+  email    = "seerr-quota-svc@example.com"
+  type     = "service_account"
+  groups   = [authentik_group.seerr_quota_readers.id]
+  # No `password` — this account only ever authenticates via API token
+  # (below), never an interactive login.
+}
+
+# RBAC grant: seerr-quota's account-sync feature (FR-SYNC-1..4) needs to
+# read (a) the Seerr application, (b) the policy bindings that target it,
+# and (c) the active user list, to compute entitlement and classification.
+# All three are read-only (`view_*`) and granted globally (no `object_id`)
+# rather than scoped to one application UUID, because the sync job
+# legitimately needs the full active-user list (FR-SYNC-4's
+# `not_entitled`/deactivation classifications aren't expressible from a
+# single app's bindings alone).
+resource "authentik_rbac_role" "seerr_quota_read" {
+  name = "Seerr Quota Read-Only"
+}
+
+resource "authentik_rbac_permission_role" "seerr_quota_read_applications" {
+  role       = authentik_rbac_role.seerr_quota_read.id
+  permission = "authentik_core.view_application"
+}
+
+resource "authentik_rbac_permission_role" "seerr_quota_read_users" {
+  role       = authentik_rbac_role.seerr_quota_read.id
+  permission = "authentik_core.view_user"
+}
+
+resource "authentik_rbac_permission_role" "seerr_quota_read_policybindings" {
+  role       = authentik_rbac_role.seerr_quota_read.id
+  permission = "authentik_policies.view_policybinding"
+}
+
+resource "authentik_group" "seerr_quota_readers" {
+  name  = "seerr-quota-readers"
+  roles = [authentik_rbac_role.seerr_quota_read.id]
+}
+
+# Dedicated API token for the service account above. `expiring = false`
+# because this is a long-lived sidecar credential you rotate by hand
+# (taint+apply this resource, then update seerr-quota's .env
+# AUTHENTIK_TOKEN), not a session token. `retrieve_key = true` so the
+# secret actually lands in `output.seerr_quota_authentik_token` below
+# instead of being generated and thrown away.
+resource "authentik_token" "seerr_quota" {
+  identifier   = "seerr-quota-readonly"
+  user         = authentik_user.seerr_quota_svc.id
+  intent       = "api"
+  description  = "Read-only token for seerr-quota's Authentik account-sync (FR-SYNC-1). Scoped via authentik_rbac_role.seerr_quota_read — view_application, view_user, view_policybinding only."
+  expiring     = false
+  retrieve_key = true
+}
+
+# ═══ 4. Output ═══
+
+# Sensitive — `terraform output -raw seerr_quota_authentik_token` to
+# extract it into seerr-quota's .env; never printed by plan/apply logs.
+output "seerr_quota_authentik_token" {
+  value     = authentik_token.seerr_quota.key
+  sensitive = true
+}
+
+# ═══ 5. Grant access — however your config expresses "this user can see
+#    this app" (a per-user `services` list, a group-based policy binding,
+#    etc.), add "seerr-quota" alongside wherever you already grant access
+#    to Seerr itself. After this, `terraform plan` should show roughly:
+#
+#   + authentik_user.seerr_quota_svc
+#   + authentik_rbac_role.seerr_quota_read
+#   + authentik_rbac_permission_role.seerr_quota_read_applications
+#   + authentik_rbac_permission_role.seerr_quota_read_users
+#   + authentik_rbac_permission_role.seerr_quota_read_policybindings
+#   + authentik_group.seerr_quota_readers
+#   + authentik_token.seerr_quota
+#   + authentik_provider_proxy.services["seerr_quota"]
+#   + authentik_application.services["seerr_quota"]
+#   + one authentik_policy_binding per user you grant access to

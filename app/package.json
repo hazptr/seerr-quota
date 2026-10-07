@@ -1,0 +1,43 @@
+{
+  "name": "seerr-quota",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "db:generate": "drizzle-kit generate"
+  },
+  "dependencies": {
+    "better-sqlite3": "12.11.1",
+    "drizzle-orm": "0.45.2",
+    "next": "15.5.20",
+    "nodemailer": "9.0.5",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "7.6.13",
+    "@types/node": "20.19.43",
+    "@types/nodemailer": "8.0.1",
+    "@types/react": "18.3.31",
+    "@types/react-dom": "18.3.7",
+    "autoprefixer": "10.5.2",
+    "drizzle-kit": "0.31.10",
+    "eslint": "8.57.1",
+    "eslint-config-next": "15.5.20",
+    "postcss": "8.5.17",
+    "tailwindcss": "3.4.19",
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
+  },
+  "_overrides_note": "siginfo/stackback pinned to the exact versions vitest's why-is-node-running already requests, sidesteps an npm bug (through npm 12) where an empty-version placeholder siginfo node makes `npm ci` throw `Invalid Version:` in canDedupe on this tree.",
+  "overrides": {
+    "siginfo": "2.0.0",
+    "stackback": "0.0.2"
+  }
+}

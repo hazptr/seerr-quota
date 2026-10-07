@@ -1,0 +1,467 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/**
+ * Design tokens — see wiki/Theming.md for the full reference table and how
+ * to write an override.
+ *
+ * The ENTIRE look (colours AND structural treatments — body/mono font,
+ * corner radius, pane titlebar visibility/style, border widths, shadow,
+ * decorative prefixes) is driven by the `--sq-*` custom properties below.
+ * Nothing outside this file hardcodes a colour, a font stack, a radius, or a
+ * border width — components only ever reach these tokens via `var(--sq-*)`
+ * or one of the `.sq-*` primitive classes defined further down.
+ *
+ * This file ships the default "Seerr-matched" theme: a dark slate/gray
+ * palette and indigo accent chosen to sit naturally alongside Seerr itself
+ * (gray-900/800/700 + indigo-500), plain rounded cards, system sans-serif,
+ * no terminal chrome. A *runtime* override (`THEME_CSS` env var, served at
+ * `/theme.css` and linked AFTER this stylesheet in `layout.tsx`) can replace
+ * any token or add rules without a rebuild — see `src/lib/theme/config.ts`
+ * and `src/app/theme.css/route.ts`.
+ *
+ * Dark is the primary/default scheme here, but a light variant ships too
+ * (see the `prefers-color-scheme: light` and `[data-theme="light"]` blocks
+ * further down) — `data-theme` is set by the inline init script in
+ * `layout.tsx` and `src/components/theme/ThemeToggle.tsx` (persisted to
+ * `localStorage`), so both the OS preference and an explicit user choice are
+ * honoured. A deployment that wants a third look entirely can still replace
+ * any token via a `THEME_CSS` override.
+ */
+:root {
+  color-scheme: dark;
+
+  /* Colour */
+  --sq-bg: #111827; /* Tailwind gray-900, Seerr's own page background */
+  --sq-pane-bg: #1f2937; /* gray-800, Seerr's card background */
+  --sq-fg: #f3f4f6; /* gray-100 */
+  --sq-muted: #9ca3af; /* gray-400 — 6.99:1 on --sq-bg, 5.8:1 on --sq-pane-bg */
+  /* --sq-dim: footer/placeholder/secondary text. #6b7280 (gray-500) only hit
+     3.67:1 on --sq-bg and 3.04:1 on --sq-pane-bg — below WCAG AA's 4.5:1.
+     #959dab clears both (6.50:1 / 5.37:1 — see contrast table in PR notes). */
+  --sq-dim: #959dab;
+  --sq-rule: rgba(255, 255, 255, 0.08);
+  --sq-pane-rule: #374151; /* gray-700, Seerr's card border */
+  --sq-titlebar-bg: transparent; /* pane title bar has no chrome by default — see .sq-titlebar */
+  --sq-titlebar-fg: var(--sq-muted);
+  --sq-titlebar-border: none; /* an override can set e.g. `1px solid var(--sq-pane-rule)` to restore a chrome strip */
+  /* indigo-600, not indigo-500: #6366f1 (the old value) only hit 4.47:1 with
+     white button text — below AA. #4f46e5 clears it at ~6.29:1 (computed via
+     the WCAG relative-luminance formula — see contrast table in PR notes). */
+  --sq-accent: #4f46e5;
+  --sq-accent-hover: #4338ca; /* indigo-700 — a visibly darker hover now that --sq-accent itself moved to indigo-600 */
+  --sq-accent-ink: #ffffff;
+  --sq-focus-ring: rgba(79, 70, 229, 0.35);
+  --sq-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.35);
+
+  /* --sq-critical: TEXT colour only (error/critical copy). The old
+     #ef4444 (red-500) hit only 3.90:1 against --sq-pane-bg — below AA.
+     #f87171 (red-400) clears 5.31:1 / 6.41:1 against pane-bg/bg. Button
+     fills use the separate --sq-critical-fill token below — red-500 was
+     being asked to serve as both a light-on-dark text colour AND a
+     white-on-red button fill, which can't both pass contrast at once. */
+  --sq-critical: #f87171;
+  --sq-critical-ink: #ffffff;
+  /* Solid/filled destructive ("danger") button background only — NOT used
+     for text. White text on #dc2626 (red-600) is ~4.83:1, clearing AA. */
+  --sq-critical-fill: #dc2626;
+  --sq-link: #818cf8; /* indigo-400, readable on the dark bg */
+  --sq-good: #22c55e; /* green-500 */
+  --sq-warning: #f59e0b; /* amber-500 */
+
+  /* Typography */
+  --sq-font:
+    system-ui, -apple-system, 'Segoe UI', Inter, Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --sq-font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+
+  /* Structure */
+  --sq-radius: 0.5rem;
+  --sq-border-width: 1px;
+  --sq-titlebar-display: block; /* pane titles are shown by default — see .sq-titlebar / .sq-pane-title */
+  --sq-rule-style: solid;
+  --sq-heading-prefix: ''; /* e.g. '"$ "' restores the terminal "$ heading" look */
+  --sq-btn-radius: var(--sq-radius);
+  --sq-btn-decoration-prefix: ''; /* e.g. '"[ "' restores the bracket button look */
+  --sq-btn-decoration-suffix: '';
+  --sq-input-prompt: ''; /* e.g. '"\2771"' (chevron) restores the terminal prompt */
+  --sq-input-caret: auto; /* `block` restores the terminal block caret (Chromium only) */
+}
+
+* {
+  border-color: var(--sq-pane-rule);
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: var(--sq-bg);
+  color: var(--sq-fg);
+  font-family: var(--sq-font);
+  -webkit-font-smoothing: antialiased;
+}
+
+:focus-visible {
+  outline: 2px solid var(--sq-accent);
+  outline-offset: 2px;
+}
+
+/* Hyperlinks: --sq-link, underlined (--sq-rule at rest, full opacity on
+   hover/focus). An explicit inline color/textDecoration on a caller still
+   wins (inline style beats a tag selector). */
+a {
+  color: var(--sq-link);
+  text-decoration-color: var(--sq-rule);
+  text-underline-offset: 0.15em;
+}
+a:hover,
+a:focus-visible {
+  text-decoration-color: currentColor;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ---------------------------------------------------------------------- */
+/* Structural primitives — see wiki/Theming.md "Token reference" for the    */
+/* full table. Every visual/structural choice below reads a `--sq-*` token, */
+/* so an override file can change radius, borders, titlebar visibility,     */
+/* decorative prefixes, caret shape, etc. without touching a component.     */
+/* ---------------------------------------------------------------------- */
+
+/* Panes / cards. */
+.sq-pane {
+  background: var(--sq-pane-bg);
+  border: var(--sq-border-width) solid var(--sq-pane-rule);
+  box-shadow: var(--sq-shadow);
+  border-radius: var(--sq-radius);
+  overflow: hidden;
+}
+
+/* Title bar strip carrying the section name. Shown by default
+   (`--sq-titlebar-display: block`) as a plain, "no chrome" heading — no
+   border or background of its own (`--sq-titlebar-bg`/`--sq-titlebar-border`
+   both resolve to nothing in the default theme); an override can set either
+   token to bring back a terminal-style chrome strip, or set
+   `--sq-titlebar-display: none` to hide it again. */
+.sq-titlebar {
+  display: var(--sq-titlebar-display);
+  background: var(--sq-titlebar-bg);
+  padding: 0.75rem 1rem 0;
+  border-bottom: var(--sq-titlebar-border);
+}
+
+/* Title bar TEXT treatment, split out from `.sq-titlebar` (the structural
+   container above) so it never shares `.sq-heading`'s optional `$ `-prefix
+   mechanism (`--sq-heading-prefix`) meant for other section headings in the
+   app — see `src/components/ui/Pane.tsx`'s header comment. Small, semibold,
+   muted — a plain Seerr-like label, not a chrome element. */
+.sq-pane-title {
+  color: var(--sq-titlebar-fg);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.sq-pane-body {
+  padding: 1rem;
+}
+
+/* Section headings (NOT pane titles — see `.sq-pane-title` above): optional
+   prefix, e.g. `$ my library` under an override that sets
+   --sq-heading-prefix. Empty (no prefix) in the default theme. */
+.sq-heading::before {
+  content: var(--sq-heading-prefix);
+  color: var(--sq-muted);
+}
+
+/* Sub-rules. Dashed in the terminal override; solid by default. */
+.sq-rule {
+  border: none;
+  border-top: var(--sq-border-width) var(--sq-rule-style) var(--sq-rule);
+  margin: 1rem 0;
+}
+
+/* Inputs (`Input.tsx`/`Textarea.tsx`): base look — background/border/radius/
+   colour/padding all come from tokens here, not an inline `style={{...}}` in
+   the component, so a `THEME_CSS` override can actually redefine them.
+   Caret shape is themeable too (`block` restores the terminal caret;
+   Chromium-only, documented-fine thin-caret fallback elsewhere). */
+.sq-input {
+  background: var(--sq-pane-bg);
+  border: var(--sq-border-width) solid var(--sq-pane-rule);
+  border-radius: var(--sq-radius);
+  outline: none;
+  color: var(--sq-fg);
+  font-family: var(--sq-font);
+  padding: 0.375rem 0.625rem;
+  caret-shape: var(--sq-input-caret);
+}
+
+/* Textarea-only sizing additions, layered on top of `.sq-input` above. */
+.sq-textarea {
+  width: 100%;
+  min-height: 3.5rem;
+  resize: vertical;
+  box-sizing: border-box;
+}
+
+/* Decorative prompt glyph rendered before text inputs (empty by default). */
+.sq-input-prompt::before {
+  content: var(--sq-input-prompt);
+}
+
+/* Decorative bracket-style button text, e.g. `[ label ]` under an override
+   that sets --sq-btn-decoration-prefix/-suffix. Empty by default. */
+.sq-btn-decoration-prefix::before {
+  content: var(--sq-btn-decoration-prefix);
+}
+.sq-btn-decoration-suffix::after {
+  content: var(--sq-btn-decoration-suffix);
+}
+
+/* Primary / destructive button base. */
+.sq-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  background: var(--sq-accent);
+  color: var(--sq-accent-ink);
+  border: none;
+  border-radius: var(--sq-btn-radius);
+  padding: 0.5rem 0.875rem;
+  font-family: var(--sq-font);
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+.sq-btn:hover {
+  background: var(--sq-accent-hover);
+}
+.sq-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+/* Solid destructive fill — deliberately --sq-critical-fill, not
+   --sq-critical (that token is TEXT-only; see its definition above for why
+   one colour can't serve as both a light-on-dark text colour and a
+   white-on-fill button background at once). */
+.sq-btn-destructive {
+  background: var(--sq-critical-fill);
+  color: var(--sq-critical-ink);
+}
+.sq-btn-destructive:hover {
+  filter: brightness(0.9);
+}
+.sq-btn-plain {
+  background: transparent;
+  color: inherit;
+  border-radius: 0;
+  padding: 0.25rem 0.5rem;
+}
+.sq-btn-plain:hover {
+  background: transparent;
+  text-decoration: underline;
+}
+
+/* Full-bleed table wrapper (`.sq-table-bleed`, `DeleteSelectTable` only):
+   the pane body's own 1rem padding is cancelled via a negative margin +
+   matching width increase, so a selected row's highlight (--sq-focus-ring)
+   reaches the pane's actual edges instead of stopping short of them.
+   Desktop only, gated at the same breakpoint `.sq-table-responsive` uses. */
+.sq-table-bleed {
+  width: 100%;
+}
+@media (min-width: 641px) {
+  .sq-table-bleed {
+    margin: 0 -1rem;
+    width: calc(100% + 2rem);
+  }
+}
+
+/* Quota usage bar (`QuotaPane`): track in --sq-rule, fill colour set inline
+   per-row via `severityColorVar` (`@/components/member/logic`) since it
+   depends on that row's percentUsed — not expressible as a static class. */
+.sq-bar-track {
+  background: var(--sq-rule);
+  border-radius: 3px;
+  height: 6px;
+  overflow: hidden;
+}
+.sq-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+}
+
+/* Empty states: comment-style, in --sq-muted. */
+.sq-empty {
+  color: var(--sq-muted);
+}
+.sq-empty::before {
+  content: '';
+}
+
+/* ---------------------------------------------------------------------- */
+/* Responsive data tables — every table collapses each row from a table     */
+/* row into a stacked label/value card below the breakpoint, zero JS,       */
+/* keyed off a `data-label` attribute callers set on every `<td>` (matching */
+/* that column's header text). `thead` is hidden with the standard clip     */
+/* technique rather than `display: none`, so it stays in the a11y tree.     */
+/* `!important` throughout because every table's own `cellStyle` sets       */
+/* conflicting values (padding, whiteSpace, maxWidth, borderBottom) as      */
+/* inline `style`, which otherwise wins over a class every time.            */
+/* ---------------------------------------------------------------------- */
+@media (max-width: 640px) {
+  .sq-table-responsive {
+    min-width: 0 !important;
+  }
+
+  .sq-table-responsive thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .sq-table-responsive,
+  .sq-table-responsive tbody,
+  .sq-table-responsive tr {
+    display: block;
+    width: 100%;
+  }
+
+  .sq-table-responsive tr {
+    padding: 0.5rem 0.125rem;
+    border-bottom: var(--sq-border-width) var(--sq-rule-style) var(--sq-rule);
+  }
+  .sq-table-responsive tr:last-child {
+    border-bottom: none;
+  }
+
+  .sq-table-responsive td {
+    display: flex !important;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 0.75rem;
+    width: 100%;
+    max-width: none !important;
+    min-width: 0 !important;
+    overflow: visible !important;
+    text-overflow: clip !important;
+    white-space: normal !important;
+    border-bottom: none !important;
+    padding: 0.1875rem 0.125rem !important;
+  }
+
+  .sq-table-responsive td[data-label]::before {
+    content: attr(data-label);
+    flex: 0 0 auto;
+    color: var(--sq-muted);
+  }
+}
+
+/* App footer: small, unobtrusive version readout (item 2, "Versioning"). */
+.sq-footer {
+  color: var(--sq-dim);
+  font-size: 0.75rem;
+  padding: 0.75rem 1rem;
+  text-align: center;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Light theme — Seerr-ish light look (gray-50 page / white cards). Honours */
+/* both the OS preference (`prefers-color-scheme: light`, only when the     */
+/* user hasn't made an explicit in-app choice) and `ThemeToggle`'s explicit */
+/* choice (`data-theme="light"`/`"dark"` on `<html>`, set by that component */
+/* and by `layout.tsx`'s no-flash init script). The two blocks below        */
+/* duplicate the same token values rather than share them — plain CSS has   */
+/* no way to parameterise a ruleset by both a media query AND an attribute  */
+/* selector without the duplication, short of adding a preprocessor.        */
+/* All pairs here were checked against the WCAG relative-luminance formula  */
+/* for >=4.5:1 — see the contrast table in this change's PR notes.          */
+/* ---------------------------------------------------------------------- */
+
+@media (prefers-color-scheme: light) {
+  /* Deliberately a PLAIN `:root` selector here, not `:root:not([data-theme=
+     "dark"])` — that would add an attribute-selector to this block's
+     specificity (0,2,0 vs plain `:root`'s 0,1,0), which would then also
+     beat a `THEME_CSS` override file's own plain `:root { ... }` block
+     whenever the OS prefers light, silently breaking every custom theme on
+     a light-preference system. `:root[data-theme="dark"]` below already has
+     higher specificity than this plain `:root` purely from its own
+     attribute selector, so an explicit dark choice still wins over the OS
+     preference without needing `:not()` here. */
+  :root {
+    color-scheme: light;
+    --sq-bg: #f9fafb; /* gray-50 */
+    --sq-pane-bg: #ffffff;
+    --sq-fg: #111827; /* gray-900 — 16.98:1 on --sq-bg, 17.74:1 on --sq-pane-bg */
+    --sq-muted: #374151; /* gray-700 — 9.86:1 / 10.31:1 */
+    --sq-dim: #4b5563; /* gray-600 — 7.23:1 / 7.56:1 */
+    --sq-rule: rgba(0, 0, 0, 0.08);
+    --sq-pane-rule: #e5e7eb; /* gray-200 */
+    --sq-titlebar-bg: transparent;
+    --sq-titlebar-fg: var(--sq-muted);
+    --sq-titlebar-border: none;
+    --sq-accent: #4f46e5; /* indigo-600 — white button text ~6.29:1 */
+    --sq-accent-hover: #4338ca; /* indigo-700 */
+    --sq-accent-ink: #ffffff;
+    --sq-focus-ring: rgba(79, 70, 229, 0.35);
+    --sq-shadow: 0 1px 2px rgba(0, 0, 0, 0.06), 0 8px 24px rgba(0, 0, 0, 0.08);
+    --sq-critical: #dc2626; /* red-600 — 4.83:1 on white (red-400 fails on a light bg) */
+    --sq-critical-fill: #dc2626;
+    --sq-critical-ink: #ffffff;
+    --sq-link: #4f46e5; /* indigo-400 (dark theme's --sq-link) fails on a light bg; reuse the accent */
+    --sq-good: #15803d; /* green-700 — 5.02:1 on white (green-500 fails) */
+    --sq-warning: #b45309; /* amber-700 — 5.02:1 on white (amber-500 fails) */
+  }
+}
+
+/* Explicit choices (`ThemeToggle` / the init script set `data-theme` on
+   `<html>`) override the OS preference either way. */
+:root[data-theme='light'] {
+  color-scheme: light;
+  --sq-bg: #f9fafb;
+  --sq-pane-bg: #ffffff;
+  --sq-fg: #111827;
+  --sq-muted: #374151;
+  --sq-dim: #4b5563;
+  --sq-rule: rgba(0, 0, 0, 0.08);
+  --sq-pane-rule: #e5e7eb;
+  --sq-titlebar-bg: transparent;
+  --sq-titlebar-fg: var(--sq-muted);
+  --sq-titlebar-border: none;
+  --sq-accent: #4f46e5;
+  --sq-accent-hover: #4338ca;
+  --sq-accent-ink: #ffffff;
+  --sq-focus-ring: rgba(79, 70, 229, 0.35);
+  --sq-shadow: 0 1px 2px rgba(0, 0, 0, 0.06), 0 8px 24px rgba(0, 0, 0, 0.08);
+  --sq-critical: #dc2626;
+  --sq-critical-fill: #dc2626;
+  --sq-critical-ink: #ffffff;
+  --sq-link: #4f46e5;
+  --sq-good: #15803d;
+  --sq-warning: #b45309;
+}
+
+:root[data-theme='dark'] {
+  /* Re-affirms the default dark tokens already set on `:root` — present so
+     an explicit "dark" choice is self-documenting here and isn't silently
+     relying on "no light block matched". */
+  color-scheme: dark;
+}

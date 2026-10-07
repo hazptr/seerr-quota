@@ -1,0 +1,80 @@
+# seerr-quota — in-Seerr quota banner (wiki/Feature-10-In-Seerr-Banner.md,
+# FR-BAN-1/FR-BAN-2).
+#
+# Reference text only — NOT applied automatically. Paste this into your
+# nginx vhost config for Seerr, under your own review. This assumes an
+# nginx reverse proxy with Authentik (or another) forward-auth already
+# protecting every vhost — the shared include referenced below
+# (`authentik-location.conf`) is whatever your setup already uses for that;
+# adjust the names to match your own reverse-proxy config.
+#
+# Three additions to your existing Seerr vhost config:
+#   1. A static location serving the banner script itself.
+#   2. A same-origin status endpoint, gated by the SAME forward-auth include
+#      every other protected vhost uses, proxied straight through to the
+#      seerr-quota app container.
+#   3. One `sub_filter` line added to the EXISTING `location /` block (the
+#      main Seerr proxy) that injects a single <script defer> tag before
+#      </head>, plus the two directives that make sub_filter actually work.
+#
+# Apply by pasting blocks 1 and 2 anywhere in the `server {}` block (outside
+# any existing `location` block), and adding the lines under "ADD TO THE
+# EXISTING location / BLOCK" below into your vhost's current
+# `location / { ... }` block. Then validate (`nginx -t`) and reload
+# (`nginx -s reload`) your proxy container.
+
+# ---------------------------------------------------------------------------
+# 1. Static: the banner script itself.
+#    Copy `examples/quota-banner.js` to wherever your proxy serves static
+#    files from (e.g. its `www/` directory) at deploy time. Cache-Control is
+#    intentionally SHORT so an edit to the script rolls out to browsers
+#    within a minute rather than needing a CDN purge.
+# ---------------------------------------------------------------------------
+location = /_/quota-banner.js {
+    alias /config/www/quota-banner.js;
+    default_type application/javascript;
+    add_header Cache-Control "public, max-age=60" always;
+}
+
+# ---------------------------------------------------------------------------
+# 2. Same-origin status endpoint (FR-BAN-2/FR-BAN-3).
+#    seerr.example.com/_quota-status, NOT quota.example.com — same-origin is
+#    the whole trick: no CORS preflight, no cookie SameSite problem, and the
+#    forward-auth include below supplies Remote-User/Remote-Groups exactly
+#    like every other gated vhost, so the app sees the SAME identity it
+#    would from its own vhost directly.
+# ---------------------------------------------------------------------------
+location = /_quota-status {
+    include /config/nginx/authentik-location.conf;
+    proxy_set_header Remote-User   $authentik_username;
+    proxy_set_header Remote-Groups $authentik_groups;
+    include /config/nginx/proxy.conf;
+    include /config/nginx/resolver.conf;
+    set $upstream_app  seerr-quota;
+    set $upstream_port 3000;
+    set $upstream_proto http;
+    proxy_pass $upstream_proto://$upstream_app:$upstream_port/api/quota-status;
+}
+
+# ---------------------------------------------------------------------------
+# 3. ADD TO THE EXISTING `location /` BLOCK (the main Seerr proxy) —
+#    do not create a new location for this, it must apply to Seerr's own
+#    HTML responses.
+#
+#    THE ACCEPT-ENCODING GOTCHA: without
+#    `proxy_set_header Accept-Encoding "";`, Seerr's upstream response stays
+#    gzip-compressed. `sub_filter` operates on the response BODY TEXT and
+#    can only match a literal string — against a gzipped byte stream, the
+#    literal `</head>` never appears (it's inside the compressed payload),
+#    so the substitution silently does nothing: no error, no log line, just
+#    a page that never got the script tag. Setting Accept-Encoding to empty
+#    tells the upstream "I don't support compression," so Seerr sends plain
+#    text nginx can actually pattern-match against. This trades a bit more
+#    bandwidth on Seerr's HTML documents only — its JS/CSS/image assets are
+#    untouched and still compressed normally, since this header override
+#    lives inside THIS location block, not globally.
+# ---------------------------------------------------------------------------
+#    proxy_set_header Accept-Encoding "";
+#    sub_filter '</head>' '<script defer src="/_/quota-banner.js"></script></head>';
+#    sub_filter_once on;
+#    sub_filter_types text/html;

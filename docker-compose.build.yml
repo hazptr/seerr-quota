@@ -1,0 +1,8 @@
+# Developer/operator override: build the image locally instead of pulling a
+# prebuilt one. Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+# A common local-build override pattern for a project that otherwise ships a prebuilt image.
+services:
+  seerr-quota:
+    build:
+      context: ./app

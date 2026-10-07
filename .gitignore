@@ -1,0 +1,32 @@
+# secrets & runtime data
+.env
+**/.env
+
+# runtime SQLite database lives wherever you bind-mount /db (see
+# docker-compose.yml), outside this directory — these patterns are
+# belt-and-braces for a stray local copy, and are scoped so they can't match
+# src/lib/db/.
+/db/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db-shm
+*.db-wal
+
+# node / next
+# NOTE: no trailing slash — a trailing-slash pattern only matches real
+# directories, not a symlink named `node_modules`, and `git add -A` would then
+# stage a symlink pointing outside the repo.
+node_modules
+.next/
+app/next-env.d.ts
+*.tsbuildinfo
+app/coverage/
+
+# NOTE: app/drizzle/ (drizzle-kit generated SQL migrations) is intentionally
+# NOT ignored. `ensureSchema()` applies those files at boot from the runner
+# image, so an uncommitted migration is a container that won't start.
+
+# misc
+.DS_Store
+npm-debug.log*

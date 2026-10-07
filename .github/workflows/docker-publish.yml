@@ -1,0 +1,135 @@
+name: Build and publish image
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  release:
+    types: [published]   # publishing a GitHub Release creates the tag and drives the build
+  workflow_dispatch:
+
+jobs:
+  # Unit tests (vitest) via the Dockerfile `test` stage. Runs on every PR and
+  # push so numeric/logic accuracy gates merges; build-push needs it green.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build test image
+        # Shared buildx GHA cache (distinct scope=test so it never collides
+        # with build-push's cache). --load makes the image available to the
+        # subsequent `docker run`.
+        run: >-
+          docker buildx build
+          --cache-from type=gha,scope=test
+          --cache-to type=gha,mode=max,scope=test
+          --load --target test -t seerr-quota-test ./app
+
+      - name: Typecheck + unit tests
+        run: docker run --rm seerr-quota-test sh -c 'npx tsc --noEmit && npx vitest run'
+
+  # Static analysis: ESLint (next/core-web-vitals) + a TypeScript typecheck.
+  # Runs on every PR + push; gates the publish.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Install deps
+        run: cd app && npm ci
+
+      - name: ESLint
+        run: cd app && npm run lint
+
+      - name: Typecheck
+        run: cd app && npx tsc --noEmit
+
+  build-push:
+    # Gate the image publish on tests + lint passing. PRs only run the test
+    # + lint jobs above (no publish — no secrets, and forks can't push to
+    # GHCR).
+    needs: [test, lint]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0   # need tags so `git describe` can version edge builds
+
+      - uses: docker/setup-buildx-action@v4
+
+      # NOTE on architecture: this image bundles better-sqlite3, a native
+      # addon compiled during `npm ci` (see app/Dockerfile's `deps` stage
+      # comment). Compiling it for arm64 under QEMU emulation on a GitHub-
+      # hosted amd64 runner was tried and was both slow (multi-minute native
+      # compile under emulation, on top of the regular build) and a source
+      # of flaky CI — not worth it for this app's userbase. Shipping amd64
+      # only until that changes (e.g. native arm64 runners, or a prebuilt
+      # better-sqlite3 binary for the target arch). Revisit by adding
+      # `linux/arm64` to the `platforms` list below and a
+      # `docker/setup-qemu-action@v3` step if that changes.
+
+      - name: Resolve app version
+        id: ver
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            v="$RELEASE_TAG"; v="${v#v}"   # release vX.Y.Z -> X.Y.Z
+          else
+            # main / edge build: git describe from the most recent release tag,
+            # e.g. v0.1.0-3-gabc1234 -> 0.1.0-3-gabc1234 (valid npm semver prerelease).
+            v="$(git describe --tags --always | sed 's/^v//')"
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "APP_VERSION=$v"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/seerr-quota
+          # Publishing a GitHub Release (tag vX.Y.Z) publishes X.Y.Z, X.Y, X
+          # and moves :latest (non-prerelease releases only). Pushes to main
+          # publish :edge only. Every build also gets a :sha-xxxxxxx tag.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable=${{ github.event_name == 'release' && !github.event.release.prerelease }}
+            type=edge,branch=main
+            type=sha,format=short
+          # Disable the implicit auto-latest; we control :latest explicitly above.
+          flavor: |
+            latest=false
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: ./app
+          push: true
+          platforms: linux/amd64
+          build-args: |
+            APP_VERSION=${{ steps.ver.outputs.version }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

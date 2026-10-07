@@ -1,0 +1,1 @@
+ALTER TABLE `title` ADD `split_into_seasons` integer DEFAULT false NOT NULL;
