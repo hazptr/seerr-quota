@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.0] — 2026-10-07
 
-### Security (PR #17 review — must-fix before merge)
+### Security
 
 - **`AUTH_EMAIL_HEADER` now defaults to EMPTY (disabled)**, not
   `Remote-Email`. The email-fallback login resolution only ever runs when
