@@ -299,11 +299,15 @@ export async function syncMembers(
       // own doc comment. Nothing is read/written beyond this check; `member`
       // stays exactly as it was, same as any other FR-SYNC-10 failure.
       // Second security review, "SHOULD-FIX 2": `options.forceApply` is the
-      // one-shot operator override — skip the check entirely for this call.
-      const massRevocationCheck = options.forceApply ? { refuse: false } : checkMassRevocationRisk(existingMembers, seerrUserList);
+      // one-shot operator override of the flip thresholds. It never bypasses
+      // the empty-list refusal (third security review, PR #17).
+      const massRevocationCheck = checkMassRevocationRisk(existingMembers, seerrUserList, { forced: options.forceApply === true });
       if (massRevocationCheck.refuse) {
         throw new Error(massRevocationCheck.reason);
       }
+      classified = classifyMembers(seerrUserList, existingMembers, nowSeconds, operatorConfig);
+      const defaultQuotaBytes = resolveDefaultQuotaBytes(db);
+      persistClassifiedMembers(db, classified, existingMembers, defaultQuotaBytes, nowSeconds);
       if (options.forceApply) {
         writeAuditRow(db, {
           actor: options.forcedBy ?? 'system',
@@ -315,10 +319,6 @@ export async function syncMembers(
           detail: { reason: 'operator override of the mass-revocation guard' },
         });
       }
-
-      classified = classifyMembers(seerrUserList, existingMembers, nowSeconds, operatorConfig);
-      const defaultQuotaBytes = resolveDefaultQuotaBytes(db);
-      persistClassifiedMembers(db, classified, existingMembers, defaultQuotaBytes, nowSeconds);
       classifyStep = { ok: true, count: classified.length, ms: Date.now() - classifyStart };
     } catch (err) {
       classifyStep = {

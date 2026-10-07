@@ -326,6 +326,7 @@ export interface MassRevocationCheck {
 export function checkMassRevocationRisk(
   existingMembers: ReadonlyMap<string, ExistingMemberSnapshot>,
   seerrUsers: readonly SeerrUserForMatch[],
+  options: { forced?: boolean } = {},
 ): MassRevocationCheck {
   const confirmedLinkedEntitled = [...existingMembers.values()].filter((m) => m.entitled && m.seerrUserId !== null);
   const entitledBefore = confirmedLinkedEntitled.length;
@@ -342,6 +343,19 @@ export function checkMassRevocationRisk(
   let wouldFlip = 0;
   for (const m of confirmedLinkedEntitled) {
     if (!currentSeerrIds.has(m.seerrUserId!)) wouldFlip++;
+  }
+
+  // An operator's one-shot force accepts large flips, but never an empty list
+  // (above): that is never a legitimate roster.
+  if (options.forced) return { refuse: false };
+
+  // Every confirmed-linked member vanishing at once is a wrong instance or a
+  // reset, not a departure — this also covers 1-2 member deployments.
+  if (wouldFlip === entitledBefore) {
+    return {
+      refuse: true,
+      reason: `this cycle would flip ALL ${entitledBefore} currently-entitled, confirmed-linked members to not_entitled — refusing to mass-revoke (FR-SYNC-10)`,
+    };
   }
 
   if (entitledBefore > 2 && wouldFlip > entitledBefore / 2) {

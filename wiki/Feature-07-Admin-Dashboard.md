@@ -105,7 +105,7 @@ why `FR-ADM-2`/`FR-ADM-3` forbid summing the column.
   extended `FR-SYNC-10`), the dashboard MUST show a one-shot "apply roster
   sync anyway" control (`ForceMembersSyncControl`,
   `POST /api/admin/reconcile/force-members-sync`) — operator-only, audited
-  as `sync.forced`. Hidden on every ordinary cycle; this guard has no
+  as `sync.forced`. It overrides the flip thresholds for that one call only — an empty Seerr list, a failed fetch, or a partial read is still refused. Hidden on every ordinary cycle; this guard has no
   other escape hatch, since a refused cycle otherwise stays refused on
   every scheduled run until an operator intervenes.
 - **FR-ADM-11** — The operator MUST be able to toggle `enforcement_enabled` and

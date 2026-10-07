@@ -377,20 +377,26 @@ describe('syncMembers — mass-revocation refusal (FR-SYNC-10, security review P
     expect(user3?.syncStatus).toBe('not_entitled');
   });
 
-  it('SHOULD-FIX 2: forceApply bypasses the guard for exactly one cycle, applies the cycle, and audits sync.forced with the operator as actor', async () => {
+  it('SHOULD-FIX 2: forceApply overrides the flip thresholds (never an empty list) for exactly one cycle, applies the cycle, and audits sync.forced with the operator as actor', async () => {
     const seerr = [fakeSeerrUser(1, { jellyfinUsername: 'dana' }), fakeSeerrUser(2, { jellyfinUsername: 'erin' })];
     await syncMembers({ seerrUsers: seerrUsersReturning(seerr) }, 10_600_000);
 
-    // Refused without the override.
-    const refused = await syncMembers({ seerrUsers: seerrUsersReturning([]) }, 10_700_000);
+    // Refused without the override: every linked member vanishes at once.
+    const unrelated = [fakeSeerrUser(9, { jellyfinUsername: 'zed' })];
+    const refused = await syncMembers({ seerrUsers: seerrUsersReturning(unrelated) }, 10_700_000);
     expect(refused.classify.ok).toBe(false);
 
-    // Forced: applies anyway.
-    const forced = await syncMembers({ seerrUsers: seerrUsersReturning([]) }, 10_800_000, { forceApply: true, forcedBy: 'admin' });
+    // Forcing never applies an EMPTY list (third security review, PR #17).
+    const forcedEmpty = await syncMembers({ seerrUsers: seerrUsersReturning([]) }, 10_750_000, { forceApply: true, forcedBy: 'admin' });
+    expect(forcedEmpty.classify.ok).toBe(false);
+    expect(getDb().select().from(audit).where(eq(audit.action, 'sync.forced')).all()).toHaveLength(0);
+
+    // Forced: applies the large flip anyway.
+    const forced = await syncMembers({ seerrUsers: seerrUsersReturning(unrelated) }, 10_800_000, { forceApply: true, forcedBy: 'admin' });
     expect(forced.classify.ok).toBe(true);
 
     const rows = getDb().select().from(member).all();
-    expect(rows.every((r) => r.entitled === false)).toBe(true);
+    expect(rows.filter((r) => r.ssoUsername === 'dana' || r.ssoUsername === 'erin').every((r) => r.entitled === false)).toBe(true);
 
     const forcedAudit = getDb().select().from(audit).where(eq(audit.action, 'sync.forced')).all();
     expect(forcedAudit).toHaveLength(1);

@@ -160,9 +160,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than assuming the defaults are already correct for your proxy.
 - **Mass-revocation guard (`FR-SYNC-10`, extended).** A sync cycle now
   refuses to apply (and records `sync.failed`, changing nothing) when
-  Seerr's user list comes back empty while entitled members exist, or
-  when it would flip more than half of more than two currently-entitled
-  members to `not_entitled` in one cycle — protects against a flaky/
+  Seerr's user list comes back empty while entitled members exist, when
+  every confirmed-linked member would vanish at once, or when it would
+  flip more than half of more than two confirmed-linked members to
+  `not_entitled` in one cycle. An operator can force one cycle past the
+  flip thresholds from `/admin` (never past an empty list) — protects against a flaky/
   misbehaving Seerr response mass-revoking real members' access.
 - **Review your roster after upgrading.** Two shapes of surprise are
   possible on the first post-upgrade sync, and are worth a manual look at

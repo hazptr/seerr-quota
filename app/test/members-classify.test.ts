@@ -459,6 +459,27 @@ describe('checkMassRevocationRisk (security review, PR #17, item 5)', () => {
     expect(checkMassRevocationRisk(existingMembers, seerrUsers)).toEqual({ refuse: false });
   });
 
+  it('every confirmed-linked member vanishing refuses even with only 1-2 members', () => {
+    const existingMembers = new Map([
+      ['dana', entitledRow('dana', 1)],
+      ['erin', entitledRow('erin', 2)],
+    ]);
+    const unrelated = [50, 51].map((id) => seerrUser({ id, username: `u${id}` }));
+    const result = checkMassRevocationRisk(existingMembers, unrelated);
+    expect(result.refuse).toBe(true);
+    expect(result.reason).toContain('refusing to mass-revoke');
+  });
+
+  it('a forced check accepts large flips but still refuses an empty list', () => {
+    const existingMembers = new Map([
+      ['dana', entitledRow('dana', 1)],
+      ['erin', entitledRow('erin', 2)],
+      ['frank', entitledRow('frank', 3)],
+    ]);
+    expect(checkMassRevocationRisk(existingMembers, [seerrUser({ id: 1, username: 'u1' })], { forced: true })).toEqual({ refuse: false });
+    expect(checkMassRevocationRisk(existingMembers, [], { forced: true }).refuse).toBe(true);
+  });
+
   it('losing ONE of three entitled members (33%, under the 50% threshold) -> does not refuse', () => {
     const existingMembers = new Map([
       ['dana', entitledRow('dana', 1)],

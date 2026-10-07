@@ -85,11 +85,19 @@ genuinely new Seerr account gets a freshly-derived key).
   data stale, and MUST NOT mass-flip everyone to `not_entitled`. *(Extended,
   security review PR #17)*: the SAME refusal applies to a Seerr response
   that merely LOOKS successful but is suspiciously small — an empty list
-  while at least one member is currently entitled, or a list that would
-  flip more than half of more than two currently-entitled members to
-  `not_entitled` in one cycle. Both refuse exactly like an upstream error
+  while at least one member is currently entitled, a list in which EVERY
+  confirmed-linked member has vanished (any roster size), or a list that
+  would flip more than half of more than two confirmed-linked members to
+  `not_entitled` in one cycle. Only rows with a confirmed Seerr link count.
+  All refuse exactly like an upstream error
   (a `sync.failed` audit row, nothing applied) — see
-  `src/lib/members/classify.ts`'s `checkMassRevocationRisk`.
+  `src/lib/members/classify.ts`'s `checkMassRevocationRisk`. An operator's
+  one-shot force (`FR-ADM-10a`) overrides the flip thresholds only; an empty
+  list is refused even when forced.
+- **Known gap** — a member who deletes and recreates their Seerr account
+  gets a new `seerr:{id}` row marked `ambiguous` rather than re-attaching to
+  their old row (a linked row is never adopted by a different Seerr id).
+  There is no UI to merge the two yet; resolve it in the database.
 
 ## Interactions
 

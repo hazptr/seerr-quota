@@ -370,6 +370,27 @@ describe('POST /api/admin/members/clear-alias', () => {
     expect(match?.targetType).toBe('member');
   });
 
+  it('a non-operator cannot write attacker-controlled data into the audit table via the pre-auth peek', async () => {
+    asMember();
+    const huge = 'x'.repeat(200_000);
+    const res = await clearAliasPOST(postJson('http://x/api/admin/members/clear-alias', { ssoUsername: huge }));
+    expect(res.status).toBe(403);
+    const denied = getDb().select().from(audit).where(eq(audit.action, 'access.denied')).all();
+    expect(denied.length).toBeGreaterThan(0);
+    for (const r of denied) {
+      expect(r.targetId ?? '').not.toContain('xxxx');
+      expect(JSON.stringify(r).length).toBeLessThan(5_000);
+    }
+  });
+
+  it('a non-operator naming a member that does not exist records no target', async () => {
+    asMember();
+    const res = await clearAliasPOST(postJson('http://x/api/admin/members/clear-alias', { ssoUsername: 'nobody-here' }));
+    expect(res.status).toBe(403);
+    const denied = getDb().select().from(audit).where(eq(audit.action, 'access.denied')).all();
+    expect(denied.some((r) => r.targetId === 'nobody-here')).toBe(false);
+  });
+
   it('a malformed JSON body still 403s a non-operator (auth is checked first; the pre-auth body peek is tolerant of garbage, never itself 400s)', async () => {
     asMember();
     const req = new NextRequest('http://x/api/admin/members/clear-alias', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{not json' });

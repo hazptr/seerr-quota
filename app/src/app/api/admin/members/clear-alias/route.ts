@@ -6,7 +6,9 @@
  * Body: `{ ssoUsername }`.
  */
 import { NextResponse, type NextRequest } from 'next/server';
+import { eq } from 'drizzle-orm';
 import { getDb } from '@/lib/db';
+import { member } from '@/lib/db/schema';
 import { clearLoginAlias } from '@/lib/auth/memberGate';
 import { readJsonBody, requireOperatorForRoute } from '../../_shared/guard';
 
@@ -37,8 +39,23 @@ async function peekSsoUsername(req: NextRequest): Promise<string | undefined> {
   }
 }
 
+/** Longest `sso_username` a pre-auth peek will ever echo into an audit row. */
+const MAX_PEEKED_USERNAME = 64;
+
+/**
+ * The peeked value is attacker-controlled and the audit table is
+ * append-only, so it is recorded as the denial's target ONLY when it is
+ * short and names a real member — never as free-form input (third security
+ * review, PR #17: a 2 MB `ssoUsername` was being written verbatim).
+ */
+function existingMemberTarget(candidate: string | undefined): string | undefined {
+  if (!candidate || candidate.length > MAX_PEEKED_USERNAME) return undefined;
+  const row = getDb().select({ ssoUsername: member.ssoUsername }).from(member).where(eq(member.ssoUsername, candidate)).get();
+  return row?.ssoUsername;
+}
+
 export async function POST(req: NextRequest): Promise<NextResponse> {
-  const candidate = await peekSsoUsername(req);
+  const candidate = existingMemberTarget(await peekSsoUsername(req));
   const guard = await requireOperatorForRoute(req, candidate ? { type: 'member', id: candidate } : undefined);
   if (guard.kind === 'denied') return guard.response;
 
@@ -50,6 +67,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // must not silently miss a real row and report a false `not_found`.
   const ssoUsername = typeof parsed.body.ssoUsername === 'string' ? parsed.body.ssoUsername.trim().toLowerCase() : '';
   if (ssoUsername === '') return NextResponse.json({ error: 'ssoUsername is required' }, { status: 400 });
+  if (ssoUsername.length > MAX_PEEKED_USERNAME) return NextResponse.json({ error: 'unknown member' }, { status: 404 });
 
   const outcome = clearLoginAlias(getDb(), ssoUsername, guard.identity.username);
   if (outcome.kind === 'not_found') return NextResponse.json({ error: 'unknown member' }, { status: 404 });
