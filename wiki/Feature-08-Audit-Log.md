@@ -48,7 +48,10 @@ button. The audit log is what makes that acceptable.
 |---|---|---|---|
 | `member.created` | system | member | Initial classification, default quota |
 | `member.sync_changed` | system | member | Old → new `sync_status` |
-| `member.entitlement_changed` | system | member | Gained/lost `jellyseerr` binding |
+| `member.entitlement_changed` | system | member | Gained/lost a Seerr account (0.2.0 — was the `jellyseerr` binding pre-0.2.0) |
+| `member.alias_linked` | member | member | 0.2.0: first-time email-header fallback resolution recorded a `login_alias` (`src/lib/auth/memberGate.ts`) |
+| `member.alias_cleared` | operator | member | 0.2.0: operator cleared a `login_alias` (`POST /api/admin/members/clear-alias`) |
+| `member.alias_link_denied` | system | member | 0.2.0: an email-fallback resolution was refused (target already aliased, or is an operator) — deduplicated per (header username, member) pair |
 | `quota.set` | operator | member | Before/after bytes, source, note |
 | `quota.cleared` | operator | member | Before bytes → inherit default |
 | `setting.changed` | operator | setting | Key, before/after |
@@ -70,6 +73,7 @@ button. The audit log is what makes that acceptable.
 | `access.denied` | member | `route` (or the domain type, when the attempt named one) | What was attempted — the route, and the object id if the member supplied one |
 | `webhook.rejected` | system | — | Bad/missing secret |
 | `sync.failed` | system | — | Which step, error |
+| `sync.forced` | operator | — | 0.2.0: operator overrode `checkMassRevocationRisk`'s refusal for one cycle (`POST /api/admin/reconcile/force-members-sync`) |
 | `invariant.violated` | system | title | Attribution sum mismatch (`FR-ACCT-3`) |
 
 ## Functional requirements

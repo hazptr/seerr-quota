@@ -17,6 +17,7 @@ import {
   pickLatestPerPipeline,
   readAttributionStepExtras,
   resolveBooleanRuntimeSetting,
+  wasMembersSyncRefusedByMassRevocationGuard,
   type SkippedDecisionLike,
   type SyncRunLike,
 } from '@/components/admin/logic';
@@ -289,6 +290,51 @@ describe('buildPipelineStatus', () => {
     const row: SyncRunLike = { id: 1, startedAt: 0, finishedAt: 0, steps: '{}', ok: true };
     const status = buildPipelineStatus('playback', row, 10_000, 3_600);
     expect(status.stale).toBe(true);
+  });
+});
+
+describe('wasMembersSyncRefusedByMassRevocationGuard (second security review, PR #17, SHOULD-FIX 2)', () => {
+  function pipelinesWithMembersClassifyError(error: string | null): Parameters<typeof wasMembersSyncRefusedByMassRevocationGuard>[0] {
+    return [
+      {
+        kind: 'members',
+        label: 'x',
+        neverRun: false,
+        finishedAt: 1,
+        ageSeconds: 1,
+        stale: false,
+        overallOk: error === null,
+        steps: [{ stepKey: 'classify', ok: error === null, count: 0, ms: 0, error }],
+      },
+    ];
+  }
+
+  it('false when there is no members pipeline at all', () => {
+    expect(wasMembersSyncRefusedByMassRevocationGuard([])).toBe(false);
+  });
+
+  it('false when the members pipeline classify step succeeded', () => {
+    expect(wasMembersSyncRefusedByMassRevocationGuard(pipelinesWithMembersClassifyError(null))).toBe(false);
+  });
+
+  it('false when classify failed for an UNRELATED reason (e.g. Seerr unreachable)', () => {
+    expect(wasMembersSyncRefusedByMassRevocationGuard(pipelinesWithMembersClassifyError('skipped: seerr_users step failed (ECONNREFUSED)'))).toBe(false);
+  });
+
+  it('true when classify failed with the mass-revocation refusal marker (empty-list wording)', () => {
+    expect(
+      wasMembersSyncRefusedByMassRevocationGuard(
+        pipelinesWithMembersClassifyError('Seerr returned an empty user list while 3 member(s) with a confirmed Seerr link are currently entitled — refusing to mass-revoke (FR-SYNC-10)'),
+      ),
+    ).toBe(true);
+  });
+
+  it('true when classify failed with the mass-revocation refusal marker (majority-flip wording)', () => {
+    expect(
+      wasMembersSyncRefusedByMassRevocationGuard(
+        pipelinesWithMembersClassifyError('this cycle would flip 3 of 4 currently-entitled, confirmed-linked members to not_entitled (over half) — refusing to mass-revoke (FR-SYNC-10)'),
+      ),
+    ).toBe(true);
   });
 });
 

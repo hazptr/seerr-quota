@@ -346,4 +346,49 @@ describe('POST /api/admin/members/clear-alias', () => {
     const rows = getDb().select().from(audit).where(eq(audit.action, 'member.alias_cleared')).all();
     expect(rows).toHaveLength(1);
   });
+
+  // --- Second security review (PR #17), SHOULD-FIX: lowercase input + transaction + target ---
+
+  it('lowercases a differently-cased ssoUsername before looking it up — a mixed-case input still finds the (lowercase-stored) row', async () => {
+    asOperator();
+    insertMember('erin');
+    getDb().update(member).set({ loginAlias: 'erin-newidp' }).where(eq(member.ssoUsername, 'erin')).run();
+
+    const res = await clearAliasPOST(postJson('http://x/api/admin/members/clear-alias', { ssoUsername: 'ERIN' }));
+    expect(res.status).toBe(200);
+    expect(getDb().select().from(member).where(eq(member.ssoUsername, 'erin')).get()?.loginAlias).toBeNull();
+  });
+
+  it('a member posting directly records the SPECIFIC member targeted, not just the bare route (requireOperatorForRoute target)', async () => {
+    asMember();
+    insertMember('erin');
+    const res = await clearAliasPOST(postJson('http://x/api/admin/members/clear-alias', { ssoUsername: 'erin' }));
+    expect(res.status).toBe(403);
+    const denied = getDb().select().from(audit).where(eq(audit.action, 'access.denied')).all();
+    const match = denied.find((r) => r.actor === MEMBER && r.targetId === 'erin');
+    expect(match).toBeDefined();
+    expect(match?.targetType).toBe('member');
+  });
+
+  it('a malformed JSON body still 403s a non-operator (auth is checked first; the pre-auth body peek is tolerant of garbage, never itself 400s)', async () => {
+    asMember();
+    const req = new NextRequest('http://x/api/admin/members/clear-alias', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{not json' });
+    const res = await clearAliasPOST(req);
+    expect(res.status).toBe(403);
+  });
+
+  it('the write and its audit row commit atomically — a second lookup immediately after shows both changed together', async () => {
+    asOperator();
+    insertMember('erin');
+    getDb().update(member).set({ loginAlias: 'erin-newidp' }).where(eq(member.ssoUsername, 'erin')).run();
+
+    await clearAliasPOST(postJson('http://x/api/admin/members/clear-alias', { ssoUsername: 'erin' }));
+
+    const row = getDb().select().from(member).where(eq(member.ssoUsername, 'erin')).get();
+    const auditRows = getDb().select().from(audit).where(eq(audit.action, 'member.alias_cleared')).all();
+    // Both reflect the SAME post-transaction state — proves this wasn't two
+    // independent statements that could commit (or fail) separately.
+    expect(row?.loginAlias).toBeNull();
+    expect(auditRows).toHaveLength(1);
+  });
 });

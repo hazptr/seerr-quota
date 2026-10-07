@@ -10,18 +10,26 @@
 # names directly, or (as shown here) proxy_set_header a rename so you can
 # keep this app's defaults.
 #
-# oauth2-proxy.cfg notes (security review, PR #17):
+# oauth2-proxy.cfg notes (security review, PR #17; sharpened in the second
+# review):
 #   - `set_xauthrequest = true` is what makes oauth2-proxy emit
-#     `X-Auth-Request-User`/`-Email`/`-Groups` on the `/oauth2/auth`
-#     subrequest response AT ALL — without it these headers never appear
-#     and the proxy_set_header lines below silently forward blank values.
-#   - `X-Auth-Request-User`'s content depends on `--user-id-claim` (default
-#     `sub` — an opaque subject identifier, NOT a human-readable username).
-#     Most IdPs: set `--user-id-claim=preferred_username` (OIDC) so this
-#     header actually carries a stable, human login name, OR use
-#     `X-Auth-Request-Preferred-Username` directly (oauth2-proxy sets this
-#     separately from `--set-xauthrequest` when the claim is available) —
-#     pick ONE and verify what it actually contains before relying on it.
+#     `X-Auth-Request-User`/`-Preferred-Username`/`-Email`/`-Groups` on the
+#     `/oauth2/auth` subrequest response AT ALL — without it these headers
+#     never appear and the proxy_set_header lines below silently forward
+#     blank values.
+#   - **Use `X-Auth-Request-Preferred-Username` below, NOT
+#     `X-Auth-Request-User`**, as the source for this app's username
+#     header. `X-Auth-Request-User`'s content depends on `--user-id-claim`,
+#     which DEFAULTS to `sub` (an opaque subject identifier) or, for some
+#     IdPs, `email` — NEITHER is the Seerr username `member.sso_username`
+#     actually needs to match (this app's member keys are Seerr usernames,
+#     per `wiki/Feature-02-Account-Sync.md`'s `jellyfinUsername ->
+#     username -> email` derivation order — a mismatched key here just
+#     means the login never resolves, not a security hole, but it will
+#     look like "nothing works"). `X-Auth-Request-Preferred-Username` is
+#     populated from the OIDC `preferred_username` claim whenever your IdP
+#     sends one, independent of `--user-id-claim`, which is why it's the
+#     safer default to map here.
 #   - Groups do NOT come from `--pass-user-headers` (that controls headers
 #     passed to the UPSTREAM app bypassing this auth_request/subrequest
 #     pattern entirely, not what `/oauth2/auth` returns to nginx). You need
@@ -70,7 +78,9 @@ server {
 
     location / {
         auth_request /oauth2/auth;
-        auth_request_set $oauth2_user   $upstream_http_x_auth_request_user;
+        # Preferred-Username, NOT the plain User header — see the
+        # --user-id-claim note above.
+        auth_request_set $oauth2_user   $upstream_http_x_auth_request_preferred_username;
         auth_request_set $oauth2_email  $upstream_http_x_auth_request_email;
         auth_request_set $oauth2_groups $upstream_http_x_auth_request_groups;
         error_page 401 = /oauth2/sign_in;

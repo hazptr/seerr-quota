@@ -53,6 +53,21 @@ export interface MemberSyncResult {
   classified: ClassifiedMember[];
 }
 
+/**
+ * Second security review, "SHOULD-FIX 2": the one-shot operator override for
+ * `checkMassRevocationRisk`'s refusal. `forceApply: true` skips that check
+ * entirely for THIS call only — it is never persisted as a setting, so a
+ * refused cycle stays refused on every subsequent SCHEDULED run until an
+ * operator explicitly calls this again. `forcedBy` (required when
+ * `forceApply` is true) is the operator's `sso_username`, recorded in the
+ * `sync.forced` audit row this produces so the override itself is
+ * attributable — see `POST /api/admin/reconcile/force-members-sync`.
+ */
+export interface MemberSyncOptions {
+  forceApply?: boolean;
+  forcedBy?: string;
+}
+
 /** Test seam, same shape as `src/lib/library/sync.ts`'s `LibraryAndRequestSyncDeps` — any client injected is used as-is; anything omitted is built from `getConfig()`. */
 export interface MemberSyncDeps {
   seerrUsers?: SeerrUsersClient;
@@ -260,7 +275,11 @@ function persistClassifiedMembers(
  * failure is captured in the returned `StepResult`s and in the `sync_run`
  * row, per `runStep`'s contract and this file's header comment.
  */
-export async function syncMembers(deps: MemberSyncDeps = {}, nowSeconds: number = Math.floor(Date.now() / 1000)): Promise<MemberSyncResult> {
+export async function syncMembers(
+  deps: MemberSyncDeps = {},
+  nowSeconds: number = Math.floor(Date.now() / 1000),
+  options: MemberSyncOptions = {},
+): Promise<MemberSyncResult> {
   const { seerrUsers, operatorConfig } = resolveClients(deps);
   const db = getDb();
   const startedAt = Math.floor(Date.now() / 1000);
@@ -279,9 +298,22 @@ export async function syncMembers(deps: MemberSyncDeps = {}, nowSeconds: number 
       // suspiciously small/empty Seerr list — see `checkMassRevocationRisk`'s
       // own doc comment. Nothing is read/written beyond this check; `member`
       // stays exactly as it was, same as any other FR-SYNC-10 failure.
-      const massRevocationCheck = checkMassRevocationRisk(existingMembers, seerrUserList);
+      // Second security review, "SHOULD-FIX 2": `options.forceApply` is the
+      // one-shot operator override — skip the check entirely for this call.
+      const massRevocationCheck = options.forceApply ? { refuse: false } : checkMassRevocationRisk(existingMembers, seerrUserList);
       if (massRevocationCheck.refuse) {
         throw new Error(massRevocationCheck.reason);
+      }
+      if (options.forceApply) {
+        writeAuditRow(db, {
+          actor: options.forcedBy ?? 'system',
+          actorRole: 'operator',
+          action: 'sync.forced',
+          outcome: 'ok',
+          source: 'ui',
+          correlationId: newCorrelationId(),
+          detail: { reason: 'operator override of the mass-revocation guard' },
+        });
       }
 
       classified = classifyMembers(seerrUserList, existingMembers, nowSeconds, operatorConfig);

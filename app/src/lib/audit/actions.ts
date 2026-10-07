@@ -81,6 +81,14 @@ export type AuditAction =
   | 'access.denied'
   | 'webhook.rejected'
   | 'sync.failed'
+  /**
+   * Second security review (PR #17), SHOULD-FIX 2: an operator explicitly
+   * overrode `checkMassRevocationRisk`'s refusal for one sync cycle
+   * (`src/lib/members/sync.ts`'s `syncMembers({ forceApply: true, ... })`,
+   * `POST /api/admin/reconcile/force-members-sync`). No target — this
+   * describes the OVERRIDE decision itself, not any one member.
+   */
+  | 'sync.forced'
   | 'invariant.violated';
 
 /**
@@ -117,6 +125,7 @@ export const AUDIT_ACTIONS = [
   'access.denied',
   'webhook.rejected',
   'sync.failed',
+  'sync.forced',
   'invariant.violated',
 ] as const satisfies readonly AuditAction[];
 
@@ -129,7 +138,7 @@ export const AUDIT_ACTIONS = [
  * type when it did — so `writeAuditRow` (`./write.ts`) requires `targetId` for
  * it but does not force a specific `targetType`.
  */
-const ACTIONS_WITHOUT_TARGET: ReadonlySet<AuditAction> = new Set(['webhook.rejected', 'sync.failed']);
+const ACTIONS_WITHOUT_TARGET: ReadonlySet<AuditAction> = new Set(['webhook.rejected', 'sync.failed', 'sync.forced']);
 
 export function requiresTarget(action: AuditAction): boolean {
   return !ACTIONS_WITHOUT_TARGET.has(action);

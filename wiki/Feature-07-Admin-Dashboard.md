@@ -99,6 +99,15 @@ why `FR-ADM-2`/`FR-ADM-3` forbid summing the column.
   so there is no second entitlement list left to drift from.
 - **FR-ADM-10** — The operator MUST be able to trigger an immediate reconcile
   and see per-step results from the last `sync_run`.
+- **FR-ADM-10a** *(second security review, PR #17, SHOULD-FIX 2)* — When the
+  last `members` sync cycle was refused by `checkMassRevocationRisk`
+  (`src/lib/members/classify.ts`, `wiki/Feature-02-Account-Sync.md`'s
+  extended `FR-SYNC-10`), the dashboard MUST show a one-shot "apply roster
+  sync anyway" control (`ForceMembersSyncControl`,
+  `POST /api/admin/reconcile/force-members-sync`) — operator-only, audited
+  as `sync.forced`. Hidden on every ordinary cycle; this guard has no
+  other escape hatch, since a refused cycle otherwise stays refused on
+  every scheduled run until an operator intervenes.
 - **FR-ADM-11** — The operator MUST be able to toggle `enforcement_enabled` and
   edit every `app_setting`, each audited.
 - **FR-ADM-12** — Trend views MUST show library growth by month (as

@@ -30,11 +30,13 @@ import { MemberTablePane } from '@/components/admin/MemberTablePane';
 import { NeedsAttentionPane } from '@/components/admin/NeedsAttentionPane';
 import { PendingDeletionsPane } from '@/components/member/PendingDeletionsPane';
 import { ReconcileTrigger } from '@/components/admin/ReconcileTrigger';
+import { ForceMembersSyncControl } from '@/components/admin/ForceMembersSyncControl';
 import { SettingsPane } from '@/components/admin/SettingsPane';
 import { SyncStatusPane } from '@/components/admin/SyncStatusPane';
 import { Pane } from '@/components/ui/Pane';
 import { AuthError, requireOperator } from '@/lib/auth/authorize';
 import { getConfig } from '@/lib/config';
+import { wasMembersSyncRefusedByMassRevocationGuard } from '@/components/admin/logic';
 import type { Identity } from '@/lib/auth/identity';
 import { loadAdminDashboard } from './_data/dashboard';
 import { loadPendingDeletions } from './_data/pendingDeletions';
@@ -73,6 +75,7 @@ export default async function AdminPage() {
             no data yet — first sync in progress
           </p>
           <ReconcileTrigger />
+          {wasMembersSyncRefusedByMassRevocationGuard(dashboard.pipelines) && <ForceMembersSyncControl />}
         </Pane>
       ) : (
         <>
@@ -100,6 +103,7 @@ export default async function AdminPage() {
           <FleetPane fleet={dashboard.fleet} distinctTitleCount={dashboard.fleet.distinctAttributedTitleCount} />
           <NeedsAttentionPane attention={dashboard.attention} />
           <MemberTablePane members={dashboard.members} />
+          {wasMembersSyncRefusedByMassRevocationGuard(dashboard.pipelines) && <ForceMembersSyncControl />}
           <SyncStatusPane pipelines={dashboard.pipelines} nowSeconds={dashboard.now} staleAfterSeconds={dashboard.staleAfterSeconds} timeZone={timeZone} />
         </>
       )}

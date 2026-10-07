@@ -221,4 +221,26 @@ describe('toAuthErrorResponse', () => {
   it('rethrows anything that is not an AuthError rather than swallowing it', () => {
     expect(() => toAuthErrorResponse(new Error('boom'))).toThrow('boom');
   });
+
+  it('second security review, SHOULD-FIX: a requireOperator-shaped 403 says "operator only"; a requireEntitledMember-shaped 403 says "not an active member" — never the wrong one', async () => {
+    const operatorOnlyRes = toAuthErrorResponse(new AuthError(403, 'nope')); // default reason: 'operator_only'
+    expect((await operatorOnlyRes.json()).error).toBe('forbidden: operator only');
+
+    const notActiveMemberRes = toAuthErrorResponse(new AuthError(403, 'nope', 'not_active_member'));
+    expect((await notActiveMemberRes.json()).error).toBe('forbidden: not an active member');
+  });
+
+  it('a real requireEntitledMember 403 round-trips through toAuthErrorResponse with the "not an active member" message, not "operator only"', async () => {
+    headersStore.current = new Headers({ 'Remote-User': 'ghost' }); // no member row -> blocked
+    let caught: unknown;
+    try {
+      await requireEntitledMember({ route: '/api/deletion/execute' });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(AuthError);
+    const res = toAuthErrorResponse(caught);
+    expect(res.status).toBe(403);
+    expect((await res.json()).error).toBe('forbidden: not an active member');
+  });
 });

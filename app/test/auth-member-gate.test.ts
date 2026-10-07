@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
 
 // DB_PATH must be set BEFORE `@/lib/db` (imported indirectly via
@@ -299,6 +299,42 @@ describe('resolveMemberKey — email fallback, explicitly enabled (AUTH_EMAIL_HE
     // A DIFFERENT header username hitting the SAME target is a new pair -> does get its own row.
     resolveMemberKey('different-attacker', 'opmatch2@example.com');
     expect(deniedRowsFor('operator-target-2')).toHaveLength(2);
+  });
+
+  it('second security review, item D (PoC poc2.test.ts #1): a SHORT header username that happens to be a SUBSTRING of an earlier denial\'s JSON detail is NOT wrongly suppressed', () => {
+    enableEmailFallback();
+    insertMember('admin-dedup-poc', { email: 'admin-dedup@example.com', isOperator: true });
+
+    // First denial for header username 'mallory' records detail like
+    // {"headerUsername":"mallory","reason":"target_is_operator"} — note the
+    // literal substring "a" (and "o") appear inside "target_is_operator".
+    resolveMemberKey('mallory', 'admin-dedup@example.com');
+
+    function deniedUsernamesFor(targetId: string): string[] {
+      return getDb()
+        .select({ detail: audit.detail })
+        .from(audit)
+        .where(and(eq(audit.action, 'member.alias_link_denied'), eq(audit.targetId, targetId)))
+        .all()
+        .map((r) => JSON.parse(r.detail!).headerUsername as string);
+    }
+
+    expect(deniedUsernamesFor('admin-dedup-poc')).toEqual(['mallory']);
+
+    // A header username of just 'a' (a substring of "target_is_operator" in
+    // the FIRST denial's raw detail JSON) must still be independently
+    // recorded — the OLD `detail.includes(headerUsername)` implementation
+    // would have wrongly treated this as already-denied and suppressed it.
+    resolveMemberKey('a', 'admin-dedup@example.com');
+    expect(deniedUsernamesFor('admin-dedup-poc').sort()).toEqual(['a', 'mallory']);
+
+    // Same for 'o'.
+    resolveMemberKey('o', 'admin-dedup@example.com');
+    expect(deniedUsernamesFor('admin-dedup-poc').sort()).toEqual(['a', 'mallory', 'o']);
+
+    // But re-trying 'mallory' again is still correctly deduplicated (exact match).
+    resolveMemberKey('mallory', 'admin-dedup@example.com');
+    expect(deniedUsernamesFor('admin-dedup-poc').sort()).toEqual(['a', 'mallory', 'o']);
   });
 
   // --- HIGH #2: never overwrite an existing alias (theft / ping-pong) ----

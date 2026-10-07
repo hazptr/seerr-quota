@@ -310,16 +310,18 @@ describe('syncMembers — is_operator (FR-ENF-6, background half: ADMIN_USERS on
     expect(admin?.isOperator).toBe(true);
   });
 
-  it('a brand-new Seerr account whose derived key matches ADMIN_USERS is never auto-granted a matched/operator row — surfaced ambiguous instead (security review, PR #17)', async () => {
+  it('FIX (second security review, item A): a SINGLE brand-new Seerr account whose derived key matches ADMIN_USERS maps normally — no fresh-install lockout', async () => {
     await syncMembers({ seerrUsers: seerrUsersReturning([fakeSeerrUser(1, { jellyfinUsername: null, username: 'admin' })]) }, 9_100_000);
 
     const adminRow = getDb().select().from(member).where(eq(member.ssoUsername, 'admin')).get();
-    expect(adminRow).toBeUndefined(); // no row created at the reserved key
+    expect(adminRow).toBeDefined();
+    expect(adminRow?.syncStatus).toBe('matched');
+    expect(adminRow?.entitled).toBe(true);
+    expect(adminRow?.seerrUserId).toBe(1);
+    expect(adminRow?.isOperator).toBe(true);
 
     const ambiguousRow = getDb().select().from(member).where(eq(member.ssoUsername, 'seerr:1')).get();
-    expect(ambiguousRow).toBeDefined();
-    expect(ambiguousRow?.syncStatus).toBe('ambiguous');
-    expect(ambiguousRow?.isOperator).toBe(false);
+    expect(ambiguousRow).toBeUndefined(); // no fallback row needed — the key resolved normally
   });
 
   it('a member outside ADMIN_USERS has is_operator=false, even if they would be in ADMIN_GROUP at request time', async () => {
@@ -373,5 +375,38 @@ describe('syncMembers — mass-revocation refusal (FR-SYNC-10, security review P
     const user3 = getDb().select().from(member).where(eq(member.ssoUsername, 'user3')).get();
     expect(user3?.entitled).toBe(false);
     expect(user3?.syncStatus).toBe('not_entitled');
+  });
+
+  it('SHOULD-FIX 2: forceApply bypasses the guard for exactly one cycle, applies the cycle, and audits sync.forced with the operator as actor', async () => {
+    const seerr = [fakeSeerrUser(1, { jellyfinUsername: 'dana' }), fakeSeerrUser(2, { jellyfinUsername: 'erin' })];
+    await syncMembers({ seerrUsers: seerrUsersReturning(seerr) }, 10_600_000);
+
+    // Refused without the override.
+    const refused = await syncMembers({ seerrUsers: seerrUsersReturning([]) }, 10_700_000);
+    expect(refused.classify.ok).toBe(false);
+
+    // Forced: applies anyway.
+    const forced = await syncMembers({ seerrUsers: seerrUsersReturning([]) }, 10_800_000, { forceApply: true, forcedBy: 'admin' });
+    expect(forced.classify.ok).toBe(true);
+
+    const rows = getDb().select().from(member).all();
+    expect(rows.every((r) => r.entitled === false)).toBe(true);
+
+    const forcedAudit = getDb().select().from(audit).where(eq(audit.action, 'sync.forced')).all();
+    expect(forcedAudit).toHaveLength(1);
+    expect(forcedAudit[0].actor).toBe('admin');
+    expect(forcedAudit[0].actorRole).toBe('operator');
+    expect(forcedAudit[0].outcome).toBe('ok');
+  });
+
+  it('forceApply with no prior refusal still applies normally and still audits sync.forced (the override is unconditional for that one call)', async () => {
+    const result = await syncMembers(
+      { seerrUsers: seerrUsersReturning([fakeSeerrUser(1, { jellyfinUsername: 'dana' })]) },
+      10_900_000,
+      { forceApply: true, forcedBy: 'admin' },
+    );
+    expect(result.classify.ok).toBe(true);
+    const forcedAudit = getDb().select().from(audit).where(eq(audit.action, 'sync.forced')).all();
+    expect(forcedAudit).toHaveLength(1);
   });
 });

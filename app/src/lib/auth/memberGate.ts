@@ -17,11 +17,11 @@
  * calls instead of either crashing on a missing row or silently rendering
  * zero usage.
  */
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { getDb, type SeerrQuotaDb } from '@/lib/db';
 import { audit, member } from '@/lib/db/schema';
 import { getConfig } from '@/lib/config';
-import { newCorrelationId, writeAuditRow } from '@/lib/audit';
+import { newCorrelationId, withAudit, writeAuditRow } from '@/lib/audit';
 import { isOperatorUser } from './identity';
 import type { Identity } from './identity';
 
@@ -175,23 +175,41 @@ function normalizeEmail(value: string | null | undefined): string | null {
 }
 
 /**
- * Has a `member.alias_link_denied` row already been written for this exact
- * (target member, attempted header username) pair? Checked before writing
- * another one — an attacker (or a confused legitimate user) retrying the
- * same denied resolution on every page load must not fill the audit log
- * with an identical row per request.
+ * Has a `member.alias_link_denied` row ALREADY EVER been written for this
+ * EXACT (target member, attempted header username) pair? Checked before
+ * writing another one — an attacker (or a confused legitimate user)
+ * retrying the same denied resolution on every page load must not fill the
+ * audit log with an identical row per request. Permanent, not a recency
+ * window — hence the name (no "recent"/"within X" implication): a pair
+ * denied once stays de-duplicated forever, not just for some TTL.
+ *
+ * Second security review (PR #17), item D: compares the PARSED
+ * `detail.headerUsername` for EXACT equality, via SQLite's `json_extract`
+ * pushed into the query itself — not a substring scan of the raw JSON text.
+ * The previous `detail.includes(headerUsername)` implementation was both
+ * wrong (a short header username like `a`/`o` is a substring of `"reason":
+ * "alias_already_set"`, suppressing denials for unrelated attackers) and a
+ * full table scan (reading every row's `detail` into JS before filtering);
+ * `json_extract` does the comparison in SQLite and only this exact pair's
+ * rows are ever materialized.
  */
-function hasRecentAliasLinkDenial(db: SeerrQuotaDb, targetSsoUsername: string, headerUsername: string): boolean {
-  const rows = db
-    .select({ detail: audit.detail })
+function aliasLinkDenialAlreadyRecorded(db: SeerrQuotaDb, targetSsoUsername: string, headerUsername: string): boolean {
+  const row = db
+    .select({ id: audit.id })
     .from(audit)
-    .where(and(eq(audit.action, 'member.alias_link_denied'), eq(audit.targetId, targetSsoUsername)))
-    .all();
-  return rows.some((r) => typeof r.detail === 'string' && r.detail.includes(headerUsername));
+    .where(
+      and(
+        eq(audit.action, 'member.alias_link_denied'),
+        eq(audit.targetId, targetSsoUsername),
+        sql`json_extract(${audit.detail}, '$.headerUsername') = ${headerUsername}`,
+      ),
+    )
+    .get();
+  return row !== undefined;
 }
 
 function recordAliasLinkDenied(db: SeerrQuotaDb, targetSsoUsername: string, headerUsername: string, reason: string): void {
-  if (hasRecentAliasLinkDenial(db, targetSsoUsername, headerUsername)) return; // de-duplicated — see this function's doc comment
+  if (aliasLinkDenialAlreadyRecorded(db, targetSsoUsername, headerUsername)) return; // de-duplicated — see this function's doc comment
   writeAuditRow(db, {
     actor: 'system',
     actorRole: 'system',
@@ -343,23 +361,34 @@ export function resolveMemberKey(headerUsername: string, rawEmailHeader: string 
  * that time. Always audited, even when there was nothing to clear (the
  * operator's intent is still worth a record). Used by
  * `POST /api/admin/members/clear-alias`.
+ *
+ * `ssoUsername` is matched EXACTLY as given — the route lowercases it
+ * first, matching `member.sso_username`'s stored convention (second
+ * security review, PR #17, SHOULD-FIX: a differently-cased input must not
+ * silently miss a real row and report `not_found`).
+ *
+ * The write and its audit row commit in ONE transaction (`withAudit`,
+ * `AGENTS.md` rule 4/`FR-AUD-8`) — previously these were two separate
+ * statements, so a crash between them could clear the alias with no audit
+ * trail at all.
  */
 export function clearLoginAlias(db: SeerrQuotaDb, ssoUsername: string, actor: string): { kind: 'ok' } | { kind: 'not_found' } {
   const existing = db.select({ loginAlias: member.loginAlias }).from(member).where(eq(member.ssoUsername, ssoUsername)).get();
   if (!existing) return { kind: 'not_found' };
 
-  db.update(member).set({ loginAlias: null }).where(eq(member.ssoUsername, ssoUsername)).run();
-  writeAuditRow(db, {
-    actor,
-    actorRole: 'operator',
-    action: 'member.alias_cleared',
-    targetType: 'member',
-    targetId: ssoUsername,
-    before: { loginAlias: existing.loginAlias },
-    after: { loginAlias: null },
-    outcome: 'ok',
-    source: 'ui',
-    correlationId: newCorrelationId(),
+  withAudit(db, ({ tx, audit }) => {
+    tx.update(member).set({ loginAlias: null }).where(eq(member.ssoUsername, ssoUsername)).run();
+    audit({
+      actor,
+      actorRole: 'operator',
+      action: 'member.alias_cleared',
+      targetType: 'member',
+      targetId: ssoUsername,
+      before: { loginAlias: existing.loginAlias },
+      after: { loginAlias: null },
+      outcome: 'ok',
+      source: 'ui',
+    });
   });
   return { kind: 'ok' };
 }

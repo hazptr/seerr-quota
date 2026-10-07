@@ -20,6 +20,7 @@
  * `src/components/admin/**`, writes.
  */
 import type { EffectiveQuota } from '@/lib/members/quota';
+import { MASS_REVOCATION_REFUSAL_MARKER } from '@/lib/members/classify';
 import { computeFreshness, type Severity } from '@/components/member/logic';
 
 // ---------------------------------------------------------------------------
@@ -549,6 +550,21 @@ export function buildPipelineStatus(
     overallOk: latestRow.ok,
     steps,
   };
+}
+
+/**
+ * Second security review (PR #17), "SHOULD-FIX 2": detects "the most recent
+ * `members` sync cycle was refused by `checkMassRevocationRisk`" purely
+ * from the already-loaded `pipelines` array, so the admin dashboard can
+ * conditionally show the one-shot "apply roster sync anyway" override
+ * control (`ForceMembersSyncControl`) only when it's actually relevant —
+ * never on an ordinary successful or merely-stale cycle.
+ */
+export function wasMembersSyncRefusedByMassRevocationGuard(pipelines: readonly PipelineStatus[]): boolean {
+  const membersPipeline = pipelines.find((p) => p.kind === 'members');
+  if (!membersPipeline) return false;
+  const classifyStep = membersPipeline.steps.find((s) => s.stepKey === 'classify');
+  return classifyStep?.error?.includes(MASS_REVOCATION_REFUSAL_MARKER) ?? false;
 }
 
 /** Trailing-window length for the linear runway estimate (`estimateRunwayDays`) — see that function's header comment for why this isn't the full monthly-bucketed trend engine. */

@@ -31,13 +31,26 @@ import { getIdentity } from './session';
 import { getMemberGate } from './memberGate';
 import type { Identity } from './identity';
 
+/**
+ * `reason` (second security review, PR #17, SHOULD-FIX) distinguishes WHICH
+ * 403 this is, so `toAuthErrorResponse` can give the client an accurate
+ * message instead of always saying "operator only" — a `not_active_member`
+ * 403 (from `requireEntitledMember`/`requireEntitledMemberOrOperator`) is
+ * NOT an operator-only route; saying so would actively mislead a
+ * `not_entitled`/deactivated member about why they were refused. Defaults
+ * to `'operator_only'` for `requireOperator`'s existing callers.
+ */
+export type AuthErrorReason = 'operator_only' | 'not_active_member';
+
 export class AuthError extends Error {
   readonly status: 401 | 403;
+  readonly reason: AuthErrorReason;
 
-  constructor(status: 401 | 403, message: string) {
+  constructor(status: 401 | 403, message: string, reason: AuthErrorReason = 'operator_only') {
     super(message);
     this.name = 'AuthError';
     this.status = status;
+    this.reason = reason;
   }
 }
 
@@ -110,7 +123,7 @@ export async function requireEntitledMember(ctx: AccessCheckContext): Promise<Id
   const gate = await getMemberGate(identity);
   if (gate.status !== 'ok') {
     recordAccessDenied(identity, ctx);
-    throw new AuthError(403, `forbidden: not a currently matched/entitled member (${ctx.route})`);
+    throw new AuthError(403, `forbidden: not a currently matched/entitled member (${ctx.route})`, 'not_active_member');
   }
   return identity;
 }
@@ -134,7 +147,7 @@ export async function requireEntitledMemberOrOperator(ctx: AccessCheckContext): 
   const gate = await getMemberGate(identity);
   if (gate.status !== 'ok') {
     recordAccessDenied(identity, ctx);
-    throw new AuthError(403, `forbidden: not a currently matched/entitled member (${ctx.route})`);
+    throw new AuthError(403, `forbidden: not a currently matched/entitled member (${ctx.route})`, 'not_active_member');
   }
   return identity;
 }
@@ -176,10 +189,18 @@ function recordAccessDenied(identity: Identity, ctx: AccessCheckContext): void {
  * Rethrows anything that isn't an `AuthError` — this function only knows how
  * to translate the error shape it itself defines, never swallows an
  * unrelated failure.
+ *
+ * The client-facing message distinguishes `reason` (second security review,
+ * PR #17): `'operator_only'` -> "forbidden: operator only" (unchanged);
+ * `'not_active_member'` -> "forbidden: not an active member" — a
+ * `not_entitled`/deactivated member hitting a self-service route is not
+ * being told "operator only", which would actively mislead them about why
+ * they were refused.
  */
 export function toAuthErrorResponse(err: unknown): NextResponse {
   if (err instanceof AuthError) {
-    return NextResponse.json({ error: err.status === 401 ? 'unauthorized' : 'forbidden: operator only' }, { status: err.status });
+    const message = err.status === 401 ? 'unauthorized' : err.reason === 'not_active_member' ? 'forbidden: not an active member' : 'forbidden: operator only';
+    return NextResponse.json({ error: message }, { status: err.status });
   }
   throw err;
 }

@@ -60,29 +60,46 @@
  *
  * ## Shared namespace (security review, PR #17)
  *
- * A brand-new Seerr account's derived key is checked against THREE things
- * before it's ever used as a new `sso_username`, not just "is this key
- * already a member row":
- *   1. Does it collide with a key an ALREADY-LINKED member owns this cycle?
- *      Linked rows are immutable in identity — a new Seerr account can
- *      never steal/overwrite one, even if its own derived key happens to
- *      match (e.g. Seerr user #9 sets `username: 'alice'` while Seerr user
- *      #5 is already linked to member `alice`). The new account is
- *      surfaced `ambiguous` at a separate `seerr:{id}` key instead; `alice`
- *      is never touched.
+ * A brand-new Seerr account's derived key is checked against identity-theft
+ * risks before it's ever used as a new `sso_username`, not just "is this
+ * key already a member row":
+ *   1. Does it collide with a key an ALREADY-LINKED member owns — either
+ *      currently-active this cycle, OR a member row that still carries a
+ *      `seerr_user_id` from a PRIOR link even if that Seerr account has
+ *      since vanished from the current list (second security review,
+ *      item "SHOULD-FIX 1" below)? Linked rows are immutable in identity —
+ *      a new Seerr account can never steal/overwrite one, even if its own
+ *      derived key happens to match (e.g. Seerr user #9 sets
+ *      `username: 'alice'` while Seerr user #5 is/was linked to member
+ *      `alice`). The new account is surfaced `ambiguous` at a separate
+ *      `seerr:{id}` key instead; `alice` is never touched — even if Seerr
+ *      id #5 was deleted, that's a decision for an operator to make about
+ *      `alice`'s row, not something a different, unrelated new account can
+ *      trigger by picking the same username.
  *   2. Does it collide with ANOTHER member's existing `login_alias`
  *      (`src/lib/auth/memberGate.ts`)? Exact-match login always wins over
  *      alias-match (`resolveMemberKey`'s order), so creating a new member
  *      at a string that's already someone's alias would let a future
  *      login under that exact string silently resolve to the WRONG
  *      person. Also surfaced `ambiguous`, never created.
- *   3. Does it match a configured `ADMIN_USERS` entry? A key race against
- *      the admin allowlist must never auto-grant operator status to an
- *      arbitrary new Seerr account — surfaced `ambiguous` instead, so an
- *      operator confirms the link by hand.
+ *   3. Is it claimed by MORE THAN ONE new Seerr account this cycle? Two
+ *      colliding new accounts are `ambiguous` regardless of what the key
+ *      itself is — see "Orphan key collisions" above.
  *
- * Only when NONE of these hold is the key either adopted (a matching
- * EXISTING, UNLINKED row — a legacy orphan) or created fresh.
+ * **Second security review correction**: a key matching a configured
+ * `ADMIN_USERS` entry is, BY ITSELF, NOT unsafe — a single new Seerr
+ * account deriving an admin-reserved key (e.g. the operator's own first
+ * Seerr login, where `ADMIN_USERS` already names their eventual username)
+ * is the ordinary, expected case and MUST map normally: refusing it would
+ * permanently lock the operator out of their own dashboard and deletion
+ * flow on a fresh install, since nothing else would ever create that row.
+ * `ADMIN_USERS` collision only becomes a problem combined with ONE OF THE
+ * THREE CONDITIONS ABOVE (a race for an already-taken identity) — which is
+ * already independently unsafe for other reasons, so there is no separate
+ * "is this key admin-reserved" gate any more.
+ *
+ * Only when NONE of conditions 1-3 hold is the key either adopted (a
+ * matching EXISTING, UNLINKED row — a legacy orphan) or created fresh.
  *
  * ## Members who lose their Seerr account
  *
@@ -206,15 +223,23 @@ function ambiguousOrphan(key: string, group: SeerrUserForMatch[], nowSeconds: nu
 /**
  * Security review (PR #17), "shared namespace": one Seerr account whose
  * derived key is unsafe to use outright — it would either steal an
- * ALREADY-LINKED member's identity, collide with another member's
+ * ALREADY-LINKED member's identity or collide with another member's
  * `login_alias` (letting a future exact-match login silently shadow that
- * alias's intended resolution), or auto-grant operator status via a race
- * against `ADMIN_USERS`. None of those are acceptable to resolve by
- * guessing, so this account is surfaced `ambiguous` at a SEPARATE,
- * collision-safe `seerr:{id}` key instead — the contested `key` (and
- * whatever already legitimately owns it) is never touched, and
- * `isOperator` is unconditionally `false` here (this path exists
- * specifically to prevent auto-granting it).
+ * alias's intended resolution), or it's one of several new accounts racing
+ * for the same key. None of those are acceptable to resolve by guessing, so
+ * this account is surfaced `ambiguous` at a SEPARATE, collision-safe
+ * `seerr:{id}` key instead — the contested `key` (and whatever already
+ * legitimately owns it) is never touched, and `isOperator` is
+ * unconditionally `false` here (this path exists specifically to prevent
+ * auto-granting it).
+ *
+ * `existingFallback` (second security review, item B): a Seerr account can
+ * stay stuck in this exact ambiguous state for MANY cycles in a row (the
+ * underlying collision doesn't resolve itself) — `fallbackKey` is
+ * deterministic per Seerr id, so on every later cycle this is the SAME row,
+ * not a new one. Pass the PRIOR cycle's row (if any) so `firstSeenAt` is
+ * preserved and `isNew` is correctly `false`, instead of this function
+ * being the caller's only option for "no existing row at all".
  */
 function ambiguousFallback(
   fallbackKey: string,
@@ -222,10 +247,11 @@ function ambiguousFallback(
   user: SeerrUserForMatch,
   reasons: readonly string[],
   nowSeconds: number,
+  existingFallback: ExistingMemberSnapshot | undefined,
 ): ClassifiedMember {
   return {
     ssoUsername: fallbackKey,
-    authentikUuid: null,
+    authentikUuid: existingFallback?.authentikUuid ?? null,
     displayName: user.displayName ?? user.username ?? fallbackKey,
     email: user.email,
     entitled: true,
@@ -233,8 +259,8 @@ function ambiguousFallback(
     jellyfinUserId: null,
     syncStatus: 'ambiguous',
     syncNote: `Ambiguous: Seerr account id ${user.id} would derive the login key "${derivedKey}", but ${reasons.join('; ')} — refusing to touch it or auto-grant anything (FR-SYNC-3). An operator must resolve this by hand.`,
-    isNew: true,
-    firstSeenAt: nowSeconds,
+    isNew: existingFallback === undefined,
+    firstSeenAt: existingFallback?.firstSeenAt ?? nowSeconds,
     isOperator: false,
   };
 }
@@ -250,20 +276,50 @@ function ambiguousFallback(
  * snapshot and the raw (not-yet-classified) Seerr list, pure and
  * hand-testable with no DB:
  *
- *   - Seerr's list is EMPTY while at least one existing member is
- *     currently `entitled` — refuse outright; an empty roster from a
- *     service that has users is definitionally suspicious.
- *   - More than HALF of the currently-entitled members (and more than two
- *     of them — a 1-of-1 or 1-of-2 household losing someone is normal
- *     churn, not a mass failure) would flip to `not_entitled` this cycle.
+ *   - Seerr's list is EMPTY while at least one existing member with a
+ *     CONFIRMED link (`seerr_user_id` set) is currently `entitled` —
+ *     refuse outright; an empty roster from a service that has users is
+ *     definitionally suspicious.
+ *   - More than HALF of the currently-entitled, CONFIRMED-linked members
+ *     (and more than two of them — a 1-of-1 or 1-of-2 household losing
+ *     someone is normal churn, not a mass failure) would flip to
+ *     `not_entitled` this cycle.
+ *
+ * **Second security review correction**: both counts are scoped to members
+ * with a CONFIRMED link (`seerrUserId !== null`) — an `ambiguous`/legacy
+ * placeholder row (`entitled: true`, `seerrUserId: null`) was previously
+ * counted as both "currently entitled" AND "would flip", which could
+ * trigger (or mask) a refusal based on rows that were never a real,
+ * resolvable Seerr account to begin with, and — now that `classifyMembers`
+ * re-emits a persisting ambiguous row instead of letting it decay (item B)
+ * — wouldn't actually flip to `not_entitled` most cycles anyway, making the
+ * old count simply wrong.
  *
  * Either case: `src/lib/members/sync.ts`'s `syncMembers` records a
  * `sync.failed` audit row and applies NOTHING — `member` stays exactly as
- * it was, same as any other `FR-SYNC-10` failure.
+ * it was, same as any other `FR-SYNC-10` failure. An operator who has
+ * confirmed this refusal is correct-but-unwanted (a real, large departure)
+ * can force the cycle to apply anyway via `POST
+ * /api/admin/reconcile/force-members-sync` (`syncMembers`'s `forceApply`
+ * option, audited as `sync.forced`) — see that route and
+ * `wiki/Feature-02-Account-Sync.md`. This guard cannot distinguish a
+ * genuinely wrong-but-non-empty Seerr list (one that drops a handful of
+ * real members while keeping the count plausible) from legitimate churn of
+ * the same size — it only catches EMPTY or MAJORITY-sized drops.
  */
+/**
+ * Stable substring every `checkMassRevocationRisk` refusal reason contains —
+ * exported so a display-only consumer (`@/components/admin/logic.ts`'s
+ * `wasMembersSyncRefusedByMassRevocationGuard`) can detect "the last
+ * members sync was refused by THIS specific guard" from the `sync_run.steps`
+ * JSON's `classify.error` text, without re-implementing or re-running the
+ * check itself.
+ */
+export const MASS_REVOCATION_REFUSAL_MARKER = 'refusing to mass-revoke';
+
 export interface MassRevocationCheck {
   refuse: boolean;
-  /** Human-readable, present whenever `refuse` is `true`. */
+  /** Human-readable, present whenever `refuse` is `true`. Always contains `MASS_REVOCATION_REFUSAL_MARKER`. */
   reason?: string;
 }
 
@@ -271,27 +327,27 @@ export function checkMassRevocationRisk(
   existingMembers: ReadonlyMap<string, ExistingMemberSnapshot>,
   seerrUsers: readonly SeerrUserForMatch[],
 ): MassRevocationCheck {
-  const entitledBefore = [...existingMembers.values()].filter((m) => m.entitled).length;
-  if (entitledBefore === 0) return { refuse: false }; // nothing to revoke
+  const confirmedLinkedEntitled = [...existingMembers.values()].filter((m) => m.entitled && m.seerrUserId !== null);
+  const entitledBefore = confirmedLinkedEntitled.length;
+  if (entitledBefore === 0) return { refuse: false }; // nothing with a confirmed link to revoke
 
   if (seerrUsers.length === 0) {
     return {
       refuse: true,
-      reason: `Seerr returned an empty user list while ${entitledBefore} member(s) are currently entitled — refusing to mass-revoke (FR-SYNC-10)`,
+      reason: `Seerr returned an empty user list while ${entitledBefore} member(s) with a confirmed Seerr link are currently entitled — refusing to mass-revoke (FR-SYNC-10)`,
     };
   }
 
   const currentSeerrIds = new Set(seerrUsers.map((u) => u.id));
   let wouldFlip = 0;
-  for (const m of existingMembers.values()) {
-    if (!m.entitled) continue;
-    if (m.seerrUserId === null || !currentSeerrIds.has(m.seerrUserId)) wouldFlip++;
+  for (const m of confirmedLinkedEntitled) {
+    if (!currentSeerrIds.has(m.seerrUserId!)) wouldFlip++;
   }
 
   if (entitledBefore > 2 && wouldFlip > entitledBefore / 2) {
     return {
       refuse: true,
-      reason: `this cycle would flip ${wouldFlip} of ${entitledBefore} currently-entitled members to not_entitled (over half) — refusing to mass-revoke (FR-SYNC-10)`,
+      reason: `this cycle would flip ${wouldFlip} of ${entitledBefore} currently-entitled, confirmed-linked members to not_entitled (over half) — refusing to mass-revoke (FR-SYNC-10)`,
     };
   }
 
@@ -343,25 +399,35 @@ export function classifyMembers(
 
   // 2. Every current Seerr user with no existing link — derive a new key.
   //    `key` is safe to write to ONLY when none of these hold:
-  //      - it's claimed this cycle by an already-linked member (step 1) —
-  //        LINKED ROWS ARE IMMUTABLE IN IDENTITY; a new Seerr user can
-  //        never steal/overwrite one (security review, PR #17, item 3).
+  //      - it belongs to an ALREADY-LINKED identity — either claimed this
+  //        cycle by a currently-active link (step 1), OR an existing
+  //        member row that still carries a `seerr_user_id` from a PRIOR
+  //        link even though that Seerr account isn't in the current list
+  //        (second security review, "SHOULD-FIX 1": a vanished Seerr
+  //        account must not let a DIFFERENT new account take over the old
+  //        member's row just by reusing its username).
   //      - it matches another member's existing `login_alias` (item 4).
-  //      - it matches a configured `ADMIN_USERS` entry — never auto-grant
-  //        operator status to an arbitrary new Seerr account via a key
-  //        race (item 4's "shared namespace" closing clause).
+  //      - more than one new Seerr account derives it this cycle (a plain
+  //        collision between two new accounts — see "Orphan key
+  //        collisions" above).
+  //    Matching a configured `ADMIN_USERS` entry is deliberately NOT its
+  //    own unsafe condition (second security review, item A) — a single
+  //    new Seerr account mapping to an admin-reserved key is the ordinary
+  //    "operator's own first Seerr login" case and must resolve normally.
   //    A key matching an EXISTING member row that is UNLINKED (a legacy
   //    orphan, `seerr_user_id === null`) and otherwise safe is adopted —
   //    that row's `seerr_user_id` gets filled in, no new row, no re-key.
   for (const [key, group] of newKeyGroups) {
-    const takenByLinkedRow = output.has(key);
+    const existingAtKey = existingMembers.get(key);
+    const takenByLinkedRow = output.has(key) || (existingAtKey !== undefined && existingAtKey.seerrUserId !== null);
     const isAlias = existingAliases.has(key);
-    const isAdminReserved = isOperatorUser(key, operatorConfig.adminUsers);
-    const keySafe = !takenByLinkedRow && !isAlias && !isAdminReserved;
+    const keySafe = !takenByLinkedRow && !isAlias;
 
     if (keySafe && group.length === 1) {
-      const existingUnlinked = existingMembers.get(key);
-      output.set(key, classifiedFromSeerrUser(key, group[0], existingUnlinked, nowSeconds, operatorConfig));
+      // `existingAtKey`, if present, is guaranteed unlinked here (`keySafe`
+      // already ruled out `seerrUserId !== null`) — a genuine legacy
+      // orphan row to adopt, not a row to steal.
+      output.set(key, classifiedFromSeerrUser(key, group[0], existingAtKey, nowSeconds, operatorConfig));
       continue;
     }
 
@@ -377,18 +443,20 @@ export function classifyMembers(
     // at all. Every colliding Seerr account gets its own `ambiguous` row at
     // a separate, collision-free `seerr:{id}` key instead.
     const reasons: string[] = [];
-    if (takenByLinkedRow) reasons.push('that login key already belongs to a different, already-linked member');
+    if (takenByLinkedRow) reasons.push('that login key already belongs to a different, already-linked (or previously-linked) member');
     if (isAlias) reasons.push("that login key is already another member's login alias");
-    if (isAdminReserved) reasons.push('that login key matches a configured ADMIN_USERS entry');
     if (group.length > 1) reasons.push(`it is also claimed by Seerr account id(s) ${group.map((u) => u.id).join(', ')}`);
 
     for (const user of group) {
       const fallbackKey = `seerr:${user.id}`;
-      // Pathological (an operator-created row or an earlier cycle already
-      // used this exact fallback key) — skip rather than overwrite
-      // anything; this Seerr account simply isn't represented this cycle.
-      if (output.has(fallbackKey) || existingMembers.has(fallbackKey)) continue;
-      output.set(fallbackKey, ambiguousFallback(fallbackKey, key, user, reasons, nowSeconds));
+      if (output.has(fallbackKey)) continue; // can't happen (unique Seerr ids -> unique fallback keys); defensive only
+      // Second security review, item B: this exact ambiguous placeholder
+      // may already exist from a prior cycle (the underlying collision
+      // hasn't resolved) — re-emit it (preserving firstSeenAt/isNew)
+      // rather than silently dropping it, which would let step 3 below
+      // wrongly carry it forward as "lost their Seerr account" even though
+      // the account is still listed, right here, this cycle.
+      output.set(fallbackKey, ambiguousFallback(fallbackKey, key, user, reasons, nowSeconds, existingMembers.get(fallbackKey)));
     }
   }
 
