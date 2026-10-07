@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Nothing yet.
+
+## [0.2.0] — 2026-10-07
+
 ### Security (PR #17 review — must-fix before merge)
 
 - **`AUTH_EMAIL_HEADER` now defaults to EMPTY (disabled)**, not
@@ -242,7 +246,8 @@ Sonarr, or Jellyfin can do on their own: turning "who requested what" into
   first boot: `mkdir -p data/db && sudo chown 1000:1000 data/db` (matching
   `user: "${PUID:-1000}:${PGID:-1000}"`).
 
-[Unreleased]: https://github.com/hazptr/seerr-quota/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/hazptr/seerr-quota/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/hazptr/seerr-quota/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/hazptr/seerr-quota/releases/tag/v0.1.0
 
 ## Releasing
