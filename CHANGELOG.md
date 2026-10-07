@@ -7,7 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Nothing yet.
+### Changed
+
+- Dependencies: Next.js 15.5.27, better-sqlite3 13 (Node-API prebuilt
+  binaries), nodemailer 10, drizzle-kit 0.31.11, postcss 8.5.28,
+  autoprefixer 10.6.1, eslint-config-next 15.5.27.
+- Build uses npm 11 (Docker `deps` stage and CI).
 
 ## [0.1.0] — 2026-10-07
 
