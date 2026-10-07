@@ -32,7 +32,7 @@
     "eslint-config-next": "15.5.20",
     "postcss": "8.5.17",
     "tailwindcss": "3.4.19",
-    "typescript": "5.9.3",
+    "typescript": "7.0.2",
     "vitest": "4.1.10"
   },
   "_overrides_note": "siginfo/stackback pinned to the exact versions vitest's why-is-node-running already requests, sidesteps an npm bug (through npm 12) where an empty-version placeholder siginfo node makes `npm ci` throw `Invalid Version:` in canDedupe on this tree.",
