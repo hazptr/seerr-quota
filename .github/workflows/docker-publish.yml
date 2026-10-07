@@ -44,7 +44,7 @@ jobs:
           node-version: 22
 
       - name: Install deps
-        run: cd app && npm ci
+        run: npm install -g npm@11.21.0 && cd app && npm ci
 
       - name: ESLint
         run: cd app && npm run lint

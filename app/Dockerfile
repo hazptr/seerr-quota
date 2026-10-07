@@ -10,7 +10,9 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json* ./
-RUN npm ci
+# npm 11 to match Dependabot's lockfile format (npm 10's `npm ci` rejects its
+# regenerated locks as out of sync). Keep in step with packageManager.
+RUN npm install -g npm@11.21.0 && npm ci
 
 # Test stage: source + deps, no build. `docker build --target test -t
 # seerr-quota-test ./app` then `docker run --rm seerr-quota-test` runs the
