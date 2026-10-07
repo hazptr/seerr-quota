@@ -109,6 +109,9 @@ export function resolveIdentity(
   const displayUsername = rawUsername?.trim() ?? '';
   if (displayUsername === '') return null;
   const username = displayUsername.toLowerCase();
+  // `seerr:{id}` is the reserved key shape for Seerr accounts with no usable
+  // login name (classify.ts). No login may ever resolve to one directly.
+  if (username.startsWith('seerr:')) return null;
   const groups = parseGroups(rawGroups);
   const isOperator = isOperatorUser(username, adminUsers) || isInAdminGroup(groups, adminGroup);
   return { username, displayUsername, groups, isOperator };
