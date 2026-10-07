@@ -14,7 +14,7 @@
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
-    "better-sqlite3": "12.11.1",
+    "better-sqlite3": "13.0.3",
     "drizzle-orm": "0.45.2",
     "next": "15.5.20",
     "nodemailer": "9.0.5",
