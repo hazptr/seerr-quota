@@ -1,25 +1,23 @@
 /**
- * Account sync — the P1-3 reconciler entry point (`wiki/Backlog.md`,
- * `wiki/Feature-02-Account-Sync.md`). Wires `src/lib/authentik/identity.ts`
- * (entitlement) + `./seerrUsers.ts` (Seerr accounts) into the pure
- * `classifyMembers` (`./classify.ts`), then upserts `member` (and seeds
- * `quota_policy` for a brand-new row), writing an audit row only for an
- * actual classification/entitlement CHANGE (`FR-SYNC-9`) and always
- * recording one `sync_run` row (`FR-SYNC-9`'s other half — every run, no
- * matter the outcome).
+ * Account sync — the reconciler entry point (`wiki/Backlog.md`,
+ * `wiki/Feature-02-Account-Sync.md`). Since 0.2.0 the roster comes straight
+ * from `./seerrUsers.ts` (Seerr's own user list) — there is no second,
+ * independent IdP-entitlement source to reconcile against any more (the
+ * Authentik integration was removed; see `CHANGELOG.md` 0.2.0). Wires that
+ * list into the pure `classifyMembers` (`./classify.ts`), then upserts
+ * `member` (and seeds `quota_policy` for a brand-new row), writing an audit
+ * row only for an actual classification/entitlement CHANGE (`FR-SYNC-9`) and
+ * always recording one `sync_run` row (`FR-SYNC-9`'s other half — every run,
+ * no matter the outcome).
  *
- * **Failure isolation (`FR-SYNC-10`).** The Authentik fetch (`identity`
- * step) and the Seerr user fetch (`seerr_users` step) are each wrapped in
- * `runStep` (`src/lib/http/syncStep.ts`, never throws). If EITHER fails, the
- * classify+upsert phase is skipped ENTIRELY this cycle — `member` is not
- * touched at all, not even read for a diff. This is deliberate and stronger
- * than "isolate one bad field": classification fundamentally needs BOTH
- * datasets to be trustworthy (an empty/partial entitled set would flip
- * everyone to `not_entitled`; an empty/partial Seerr list would flip every
- * `matched` member to `no_seerr_account`) — either failure mode is exactly
- * the silent mass-revocation `FR-SYNC-10` exists to prevent. A `sync.failed`
- * audit row records which step broke; `sync_run.ok` is `false`; nothing else
- * changes. See `test/members-sync.test.ts`'s dedicated "Authentik down"
+ * **Failure isolation (`FR-SYNC-10`).** The Seerr user fetch (`seerr_users`
+ * step) is wrapped in `runStep` (`src/lib/http/syncStep.ts`, never throws).
+ * If it fails, the classify+upsert phase is skipped ENTIRELY this cycle —
+ * `member` is not touched at all, not even read for a diff. An empty/partial
+ * Seerr list would otherwise flip every `matched` member to `not_entitled`
+ * — exactly the silent mass-revocation `FR-SYNC-10` exists to prevent. A
+ * `sync.failed` audit row records the failure; `sync_run.ok` is `false`;
+ * nothing else changes. See `test/members-sync.test.ts`'s "Seerr down"
  * suite.
  *
  * **`quota_policy.quota_bytes` is seeded `null` for every new member
@@ -44,39 +42,40 @@ import { getConfig } from '../config';
 import { getDb, type SeerrQuotaDb } from '../db';
 import { appSetting, member, quotaPolicy, syncRun } from '../db/schema';
 import { runStep, type StepResult } from '../http/syncStep';
-import { createAuthentikClient, type AuthentikClient } from '../authentik/client';
-import { fetchEntitledIdentities } from '../authentik/identity';
 import { createSeerrUsersClient, type SeerrUsersClient } from './seerrUsers';
-import { classifyMembers, type OperatorConfig } from './classify';
+import { checkMassRevocationRisk, classifyMembers, type OperatorConfig } from './classify';
 import type { ClassifiedMember, ExistingMemberSnapshot } from './types';
 
 export interface MemberSyncResult {
-  identity: StepResult;
   seerrUsers: StepResult;
   classify: StepResult;
   syncRunId: number;
   classified: ClassifiedMember[];
 }
 
+/**
+ * Second security review, "SHOULD-FIX 2": the one-shot operator override for
+ * `checkMassRevocationRisk`'s refusal. `forceApply: true` skips that check
+ * entirely for THIS call only — it is never persisted as a setting, so a
+ * refused cycle stays refused on every subsequent SCHEDULED run until an
+ * operator explicitly calls this again. `forcedBy` (required when
+ * `forceApply` is true) is the operator's `sso_username`, recorded in the
+ * `sync.forced` audit row this produces so the override itself is
+ * attributable — see `POST /api/admin/reconcile/force-members-sync`.
+ */
+export interface MemberSyncOptions {
+  forceApply?: boolean;
+  forcedBy?: string;
+}
+
 /** Test seam, same shape as `src/lib/library/sync.ts`'s `LibraryAndRequestSyncDeps` — any client injected is used as-is; anything omitted is built from `getConfig()`. */
 export interface MemberSyncDeps {
-  authentik?: AuthentikClient;
   seerrUsers?: SeerrUsersClient;
 }
 
-function resolveClients(
-  deps: MemberSyncDeps,
-): { authentik: AuthentikClient; seerrUsers: SeerrUsersClient; appSlug: string; appUuid: string | undefined; operatorConfig: OperatorConfig } {
+function resolveClients(deps: MemberSyncDeps): { seerrUsers: SeerrUsersClient; operatorConfig: OperatorConfig } {
   const config = getConfig();
   return {
-    authentik:
-      deps.authentik ??
-      createAuthentikClient(
-        config.upstreams.authentikUrl,
-        config.secrets.authentikToken,
-        config.scheduling.upstreamTimeoutMs,
-        config.scheduling.upstreamRetries,
-      ),
     seerrUsers:
       deps.seerrUsers ??
       createSeerrUsersClient(
@@ -85,9 +84,7 @@ function resolveClients(
         config.scheduling.upstreamTimeoutMs,
         config.scheduling.upstreamRetries,
       ),
-    appSlug: config.upstreams.seerrAppSlug,
-    appUuid: config.upstreams.authentikJellyseerrAppUuid,
-    operatorConfig: { adminUsers: config.identity.adminUsers, adminGroup: config.identity.adminGroup },
+    operatorConfig: { adminUsers: config.identity.adminUsers },
   };
 }
 
@@ -107,6 +104,7 @@ function loadExistingMembers(db: SeerrQuotaDb): Map<string, ExistingMemberSnapsh
       syncNote: row.syncNote,
       firstSeenAt: row.firstSeenAt,
       isOperator: row.isOperator,
+      loginAlias: row.loginAlias,
     });
   }
   return snapshot;
@@ -210,8 +208,8 @@ function hasClassificationChanged(existing: ExistingMemberSnapshot | undefined, 
 /**
  * `member.created` for a brand-new row; `member.entitlement_changed` when
  * `entitled` flipped; `member.sync_changed` for any other classification
- * change (e.g. `no_seerr_account` -> `matched`, or `matched` -> `ambiguous`,
- * with `entitled` staying `true` throughout). Exactly one action per changed
+ * change (e.g. `matched` -> `ambiguous` on an orphan-key collision, with
+ * `entitled` staying `true` throughout). Exactly one action per changed
  * member per cycle — see this file's header comment on why `withAudit` (one
  * call per member, not a shared batch transaction) is what makes this safe
  * to skip on a no-op cycle without touching `AGENTS.md` rule 4.
@@ -277,24 +275,50 @@ function persistClassifiedMembers(
  * failure is captured in the returned `StepResult`s and in the `sync_run`
  * row, per `runStep`'s contract and this file's header comment.
  */
-export async function syncMembers(deps: MemberSyncDeps = {}, nowSeconds: number = Math.floor(Date.now() / 1000)): Promise<MemberSyncResult> {
-  const { authentik, seerrUsers, appSlug, appUuid, operatorConfig } = resolveClients(deps);
+export async function syncMembers(
+  deps: MemberSyncDeps = {},
+  nowSeconds: number = Math.floor(Date.now() / 1000),
+  options: MemberSyncOptions = {},
+): Promise<MemberSyncResult> {
+  const { seerrUsers, operatorConfig } = resolveClients(deps);
   const db = getDb();
   const startedAt = Math.floor(Date.now() / 1000);
 
-  const { result: identityStep, items: entitledIdentities } = await runStep(() => fetchEntitledIdentities(authentik, appSlug, appUuid));
   const { result: seerrUsersStep, items: seerrUserList } = await runStep(() => seerrUsers.listAllUsers());
 
   let classifyStep: StepResult;
   let classified: ClassifiedMember[] = [];
 
-  if (identityStep.ok && seerrUsersStep.ok) {
+  if (seerrUsersStep.ok) {
     const classifyStart = Date.now();
     try {
       const existingMembers = loadExistingMembers(db);
-      classified = classifyMembers(entitledIdentities, seerrUserList, existingMembers, nowSeconds, operatorConfig);
+
+      // Security review (PR #17), item 5: refuse rather than apply a
+      // suspiciously small/empty Seerr list — see `checkMassRevocationRisk`'s
+      // own doc comment. Nothing is read/written beyond this check; `member`
+      // stays exactly as it was, same as any other FR-SYNC-10 failure.
+      // Second security review, "SHOULD-FIX 2": `options.forceApply` is the
+      // one-shot operator override of the flip thresholds. It never bypasses
+      // the empty-list refusal (third security review, PR #17).
+      const massRevocationCheck = checkMassRevocationRisk(existingMembers, seerrUserList, { forced: options.forceApply === true });
+      if (massRevocationCheck.refuse) {
+        throw new Error(massRevocationCheck.reason);
+      }
+      classified = classifyMembers(seerrUserList, existingMembers, nowSeconds, operatorConfig);
       const defaultQuotaBytes = resolveDefaultQuotaBytes(db);
       persistClassifiedMembers(db, classified, existingMembers, defaultQuotaBytes, nowSeconds);
+      if (options.forceApply) {
+        writeAuditRow(db, {
+          actor: options.forcedBy ?? 'system',
+          actorRole: 'operator',
+          action: 'sync.forced',
+          outcome: 'ok',
+          source: 'ui',
+          correlationId: newCorrelationId(),
+          detail: { reason: 'operator override of the mass-revocation guard' },
+        });
+      }
       classifyStep = { ok: true, count: classified.length, ms: Date.now() - classifyStart };
     } catch (err) {
       classifyStep = {
@@ -310,9 +334,7 @@ export async function syncMembers(deps: MemberSyncDeps = {}, nowSeconds: number 
       ok: false,
       count: 0,
       ms: 0,
-      error: !identityStep.ok
-        ? `skipped: identity step failed (${identityStep.error})`
-        : `skipped: seerr_users step failed (${seerrUsersStep.error})`,
+      error: `skipped: seerr_users step failed (${seerrUsersStep.error})`,
     };
   }
 
@@ -325,14 +347,18 @@ export async function syncMembers(deps: MemberSyncDeps = {}, nowSeconds: number 
       source: 'cron',
       correlationId: newCorrelationId(),
       detail: {
-        step: !identityStep.ok ? 'identity' : !seerrUsersStep.ok ? 'seerr_users' : 'classify',
+        step: !seerrUsersStep.ok ? 'seerr_users' : 'classify',
         error: classifyStep.error,
       },
     });
   }
 
   const finishedAt = Math.floor(Date.now() / 1000);
-  const steps: Record<string, StepResult> = { identity: identityStep, seerr_users: seerrUsersStep, classify: classifyStep };
+  // Step keys deliberately stay as a plain, dynamically-rendered record
+  // (`SyncStatusPane` iterates whatever's in this JSON — no hardcoded step
+  // name list) — a pre-0.2.0 `sync_run` row's extra `identity` step key
+  // still renders fine; new rows simply don't produce one.
+  const steps: Record<string, StepResult> = { seerr_users: seerrUsersStep, classify: classifyStep };
   const ok = Object.values(steps).every((s) => s.ok);
   const runRow = db
     .insert(syncRun)
@@ -340,5 +366,5 @@ export async function syncMembers(deps: MemberSyncDeps = {}, nowSeconds: number 
     .returning({ id: syncRun.id })
     .get();
 
-  return { identity: identityStep, seerrUsers: seerrUsersStep, classify: classifyStep, syncRunId: runRow.id, classified };
+  return { seerrUsers: seerrUsersStep, classify: classifyStep, syncRunId: runRow.id, classified };
 }

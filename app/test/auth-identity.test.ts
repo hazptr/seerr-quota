@@ -134,3 +134,14 @@ describe('resolveIdentity', () => {
     expect(identity?.isOperator).toBe(false);
   });
 });
+
+describe('resolveIdentity — reserved seerr: keys', () => {
+  it('refuses a login name in the reserved seerr:{id} key shape, any case', () => {
+    expect(resolveIdentity('seerr:12', null, ['admin'], '')).toBeNull();
+    expect(resolveIdentity('  SEERR:12 ', null, ['admin'], '')).toBeNull();
+  });
+
+  it('still accepts names that merely contain "seerr"', () => {
+    expect(resolveIdentity('seerrfan', null, ['admin'], '')?.username).toBe('seerrfan');
+  });
+});

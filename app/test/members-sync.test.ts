@@ -3,7 +3,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
-import type { AuthentikClient } from '@/lib/authentik/client';
 import type { SeerrUsersClient, SeerrUserForMatch } from '@/lib/members/seerrUsers';
 
 // Isolated throwaway DB file — same pattern as test/library-sync.test.ts and
@@ -32,49 +31,6 @@ beforeEach(() => {
   _resetConfigCacheForTests();
 });
 
-interface FakeIdentity {
-  ssoUsername: string;
-  authentikUuid: string;
-  displayName: string;
-  email: string;
-  groupNames: string[];
-}
-
-function authentikReturning(identities: FakeIdentity[]): AuthentikClient {
-  return {
-    getApplicationBySlug: async () => ({ uuid: 'app-uuid', slug: 'jellyseerr', name: 'Seerr' }),
-    listPolicyBindingsForTarget: async () =>
-      identities.map((i, index) => ({
-        pk: `binding-${index}`,
-        user: index,
-        group: null,
-        enabled: true,
-        negate: false,
-        userObj: { pk: index, username: i.ssoUsername, name: i.displayName, email: i.email, isActive: true },
-      })),
-    listActiveUsers: async () =>
-      identities.map((i, index) => ({
-        pk: index,
-        uuid: i.authentikUuid,
-        username: i.ssoUsername,
-        name: i.displayName,
-        email: i.email,
-        isActive: true,
-        groupNames: i.groupNames,
-      })),
-  } as unknown as AuthentikClient;
-}
-
-function authentikThatFails(message: string): AuthentikClient {
-  return {
-    getApplicationBySlug: async () => {
-      throw new Error(message);
-    },
-    listPolicyBindingsForTarget: async () => [],
-    listActiveUsers: async () => [],
-  } as unknown as AuthentikClient;
-}
-
 function seerrUsersReturning(users: SeerrUserForMatch[]): SeerrUsersClient {
   return { listAllUsers: async () => users } as unknown as SeerrUsersClient;
 }
@@ -87,71 +43,100 @@ function seerrUsersThatFail(message: string): SeerrUsersClient {
   } as unknown as SeerrUsersClient;
 }
 
-function fakeIdentity(ssoUsername: string, overrides: Partial<FakeIdentity> = {}): FakeIdentity {
-  return { ssoUsername, authentikUuid: `uuid-${ssoUsername}`, displayName: ssoUsername, email: `${ssoUsername}@example.com`, groupNames: [], ...overrides };
-}
-
 function fakeSeerrUser(id: number, overrides: Partial<SeerrUserForMatch> = {}): SeerrUserForMatch {
   return { id, email: `user${id}@example.com`, username: null, displayName: `user${id}`, jellyfinUsername: `user${id}`, jellyfinUserId: `guid-${id}`, ...overrides };
 }
 
-describe('syncMembers — the live correctness bar (wiki/Feature-02-Account-Sync.md)', () => {
-  it('persists exactly the documented classification for the 2026-08-24 worked table', async () => {
-    const entitledUsernames = ['admin', 'carol', 'dana', 'erin', 'jack', 'frank', 'ivy', 'hank', 'family', 'gus'];
-    const identities = entitledUsernames.map((u) => fakeIdentity(u, { email: u === 'family' ? '' : `${u}@example.com` }));
-    const matchedUsernames = ['admin', 'carol', 'dana', 'erin', 'jack', 'frank'];
-    const seerrUsers = [
-      ...matchedUsernames.map((u, i) => fakeSeerrUser(i + 1, { jellyfinUsername: u, email: `${u}@example.com` })),
-      fakeSeerrUser(9, { jellyfinUsername: null, username: 'akadmin', displayName: 'akadmin', email: null }),
-    ];
+describe('syncMembers — roster comes straight from Seerr (0.2.0)', () => {
+  it('every Seerr user becomes a matched, entitled member; no Authentik step exists any more', async () => {
+    const seerrUsers = ['carol', 'dana', 'erin'].map((u, i) => fakeSeerrUser(i + 1, { jellyfinUsername: u, email: `${u}@example.com` }));
 
-    const result = await syncMembers({ authentik: authentikReturning(identities), seerrUsers: seerrUsersReturning(seerrUsers) }, 1_000_000);
+    const result = await syncMembers({ seerrUsers: seerrUsersReturning(seerrUsers) }, 1_000_000);
 
-    expect(result.identity.ok).toBe(true);
     expect(result.seerrUsers.ok).toBe(true);
     expect(result.classify.ok).toBe(true);
 
     const rows = getDb().select().from(member).all();
-    expect(rows).toHaveLength(11); // 10 entitled + akadmin orphan
-
-    for (const u of matchedUsernames) {
+    expect(rows).toHaveLength(3);
+    for (const u of ['carol', 'dana', 'erin']) {
       const row = rows.find((r) => r.ssoUsername === u);
       expect(row?.syncStatus, u).toBe('matched');
       expect(row?.entitled).toBe(true);
       expect(row?.seerrUserId).not.toBeNull();
     }
-    for (const u of ['ivy', 'hank', 'family', 'gus']) {
-      const row = rows.find((r) => r.ssoUsername === u);
-      expect(row?.syncStatus, u).toBe('no_seerr_account');
-      expect(row?.entitled).toBe(true);
-    }
-    const akadmin = rows.find((r) => r.ssoUsername === 'akadmin');
-    expect(akadmin?.syncStatus).toBe('not_entitled');
-    expect(akadmin?.entitled).toBe(false);
 
-    // Every member (however classified) has a resolvable quota_policy ROW (FR-SYNC-5) — but no
-    // DEFAULT_QUOTA_BYTES is configured in this test, so its value is `null` ("nobody has decided
-    // yet"), never silently promoted to `0` ("unlimited") — FR-POL-2. See the dedicated
-    // "quota assignment" describe block below for the null/0/N distinction end to end.
+    // Every member has a resolvable quota_policy row (FR-SYNC-5), null until an operator decides (FR-POL-2).
     const quotaRows = getDb().select().from(quotaPolicy).all();
-    expect(quotaRows).toHaveLength(11);
-    expect(quotaRows.every((q) => q.source === 'default')).toBe(true);
-    expect(quotaRows.every((q) => q.quotaBytes === null)).toBe(true);
+    expect(quotaRows).toHaveLength(3);
+    expect(quotaRows.every((q) => q.source === 'default' && q.quotaBytes === null)).toBe(true);
 
-    // sync_run recorded with the right step keys.
+    // sync_run recorded with the new (smaller) step set — no `identity` step.
     const runRow = getDb().select().from(syncRun).where(eq(syncRun.id, result.syncRunId)).get();
     expect(runRow?.ok).toBe(true);
     const steps = JSON.parse(runRow!.steps);
-    expect(steps.identity.ok).toBe(true);
     expect(steps.seerr_users.ok).toBe(true);
     expect(steps.classify.ok).toBe(true);
+    expect(steps.identity).toBeUndefined();
+  });
+
+  it('a Seerr user that disappears flips to entitled=false/not_entitled and the row is KEPT, never deleted', async () => {
+    // Three members so the mass-revocation guard (security review, PR #17,
+    // item 5) doesn't refuse this cycle — losing ONE of three is normal
+    // churn, not a suspicious empty/mass-revoking list. See the dedicated
+    // "mass-revocation refusal" describe block below for the empty-list case.
+    const seerr = [fakeSeerrUser(6, { jellyfinUsername: 'erin' }), fakeSeerrUser(7, { jellyfinUsername: 'frank' }), fakeSeerrUser(8, { jellyfinUsername: 'gus' })];
+    await syncMembers({ seerrUsers: seerrUsersReturning(seerr) }, 4_000_000);
+
+    // Next cycle: Seerr no longer lists erin, but frank/gus remain.
+    await syncMembers({ seerrUsers: seerrUsersReturning(seerr.slice(1)) }, 4_900_000);
+
+    const row = getDb().select().from(member).where(eq(member.ssoUsername, 'erin')).get();
+    expect(row).toBeDefined();
+    expect(row?.entitled).toBe(false);
+    expect(row?.syncStatus).toBe('not_entitled');
+    expect(row?.seerrUserId).toBe(6); // linkage preserved for history (claims/audit keyed on sso_username, unaffected)
+  });
+});
+
+describe('syncMembers — member key stability across re-syncs (task item 2, CRITICAL for production continuity)', () => {
+  it('an existing linked member keeps its sso_username even if Seerr later reports a different jellyfinUsername for the same account', async () => {
+    await syncMembers({ seerrUsers: seerrUsersReturning([fakeSeerrUser(42, { jellyfinUsername: 'original-login' })]) }, 1_000_000);
+    const before = getDb().select().from(member).all();
+    expect(before).toHaveLength(1);
+    expect(before[0].ssoUsername).toBe('original-login');
+
+    // Seerr now reports a renamed jellyfinUsername for the SAME account id.
+    await syncMembers({ seerrUsers: seerrUsersReturning([fakeSeerrUser(42, { jellyfinUsername: 'renamed-login' })]) }, 2_000_000);
+
+    const after = getDb().select().from(member).all();
+    expect(after).toHaveLength(1); // no duplicate row
+    expect(after[0].ssoUsername).toBe('original-login'); // key did NOT change
+    expect(after[0].seerrUserId).toBe(42);
+  });
+
+  it('a second Seerr user never creates a duplicate row for an already-linked account', async () => {
+    await syncMembers({ seerrUsers: seerrUsersReturning([fakeSeerrUser(1, { jellyfinUsername: 'dana' })]) }, 1_000_000);
+    await syncMembers({ seerrUsers: seerrUsersReturning([fakeSeerrUser(1, { jellyfinUsername: 'dana' }), fakeSeerrUser(2, { jellyfinUsername: 'erin' })]) }, 2_000_000);
+
+    const rows = getDb().select().from(member).all();
+    expect(rows).toHaveLength(2);
+    expect(rows.filter((r) => r.seerrUserId === 1)).toHaveLength(1);
+  });
+
+  it('a genuinely new Seerr user creates exactly one new member row', async () => {
+    await syncMembers({ seerrUsers: seerrUsersReturning([fakeSeerrUser(1, { jellyfinUsername: 'dana' })]) }, 1_000_000);
+    await syncMembers({ seerrUsers: seerrUsersReturning([fakeSeerrUser(1, { jellyfinUsername: 'dana' }), fakeSeerrUser(2, { jellyfinUsername: 'erin' })]) }, 2_000_000);
+
+    const erin = getDb().select().from(member).where(eq(member.ssoUsername, 'erin')).get();
+    expect(erin).toBeDefined();
+    expect(erin?.seerrUserId).toBe(2);
+    expect(erin?.isOperator).toBe(false);
   });
 });
 
 describe('syncMembers — audit discipline (FR-SYNC-9)', () => {
   it('a brand-new member produces exactly one audit row recording creation + default quota assignment', async () => {
-    const identities = [fakeIdentity('ivy')];
-    const result = await syncMembers({ authentik: authentikReturning(identities), seerrUsers: seerrUsersReturning([]) }, 2_000_000);
+    const result = await syncMembers({ seerrUsers: seerrUsersReturning([fakeSeerrUser(1, { jellyfinUsername: 'ivy' })]) }, 2_000_000);
     expect(result.classify.ok).toBe(true);
 
     const rows = getDb().select().from(audit).where(eq(audit.targetId, 'ivy')).all();
@@ -160,22 +145,21 @@ describe('syncMembers — audit discipline (FR-SYNC-9)', () => {
     expect(rows[0].actor).toBe('system');
     expect(rows[0].outcome).toBe('ok');
     const after = JSON.parse(rows[0].after!);
-    expect(after.syncStatus).toBe('no_seerr_account');
+    expect(after.syncStatus).toBe('matched');
     // No DEFAULT_QUOTA_BYTES is configured in this test — the audit row honestly records `null`
     // ("nobody has decided yet"), not `0` ("unlimited") — FR-POL-2.
     expect(after.defaultQuotaBytes).toBeNull();
   });
 
   it('a routine no-op re-sync (identical classification) writes ZERO new audit rows', async () => {
-    const identities = [fakeIdentity('dana')];
     const seerr = [fakeSeerrUser(4, { jellyfinUsername: 'dana' })];
-    await syncMembers({ authentik: authentikReturning(identities), seerrUsers: seerrUsersReturning(seerr) }, 3_000_000);
+    await syncMembers({ seerrUsers: seerrUsersReturning(seerr) }, 3_000_000);
 
     const auditCountAfterFirst = getDb().select().from(audit).all().length;
     expect(auditCountAfterFirst).toBeGreaterThan(0);
 
     // Second, identical sync.
-    await syncMembers({ authentik: authentikReturning(identities), seerrUsers: seerrUsersReturning(seerr) }, 3_900_000);
+    await syncMembers({ seerrUsers: seerrUsersReturning(seerr) }, 3_900_000);
     const auditCountAfterSecond = getDb().select().from(audit).all().length;
     expect(auditCountAfterSecond).toBe(auditCountAfterFirst);
 
@@ -185,12 +169,13 @@ describe('syncMembers — audit discipline (FR-SYNC-9)', () => {
   });
 
   it('losing entitlement writes exactly one member.entitlement_changed audit row', async () => {
-    const identities = [fakeIdentity('erin')];
-    const seerr = [fakeSeerrUser(6, { jellyfinUsername: 'erin' })];
-    await syncMembers({ authentik: authentikReturning(identities), seerrUsers: seerrUsersReturning(seerr) }, 4_000_000);
+    // Two members so the mass-revocation guard (security review, PR #17,
+    // item 5) doesn't refuse this cycle for being an empty list.
+    const seerr = [fakeSeerrUser(6, { jellyfinUsername: 'erin' }), fakeSeerrUser(9, { jellyfinUsername: 'ivy' })];
+    await syncMembers({ seerrUsers: seerrUsersReturning(seerr) }, 4_000_000);
 
-    // Next cycle: erin no longer holds the binding.
-    await syncMembers({ authentik: authentikReturning([]), seerrUsers: seerrUsersReturning(seerr) }, 4_900_000);
+    // Next cycle: erin's Seerr account is gone, ivy's is not.
+    await syncMembers({ seerrUsers: seerrUsersReturning(seerr.slice(1)) }, 4_900_000);
 
     const rows = getDb().select().from(audit).where(eq(audit.targetId, 'erin')).all();
     const entitlementRows = rows.filter((r) => r.action === 'member.entitlement_changed');
@@ -199,10 +184,8 @@ describe('syncMembers — audit discipline (FR-SYNC-9)', () => {
     const row = getDb().select().from(member).where(eq(member.ssoUsername, 'erin')).get();
     expect(row?.entitled).toBe(false);
     expect(row?.syncStatus).toBe('not_entitled');
-    // Claims/history keys (seerr_user_id) are preserved, not nulled (FR-SYNC-6).
-    expect(row?.seerrUserId).toBe(6);
+    expect(row?.seerrUserId).toBe(6); // preserved, not nulled (FR-SYNC-6)
 
-    // The member row was NOT deleted, and quota_policy is untouched.
     const quotaRow = getDb().select().from(quotaPolicy).where(eq(quotaPolicy.ssoUsername, 'erin')).get();
     expect(quotaRow).toBeDefined();
   });
@@ -213,18 +196,11 @@ describe('syncMembers — quota assignment (FR-SYNC-5, FR-POL-2a: inheritance re
     process.env.DEFAULT_QUOTA_BYTES = '500000000000';
     _resetConfigCacheForTests();
 
-    await syncMembers({ authentik: authentikReturning([fakeIdentity('jack')]), seerrUsers: seerrUsersReturning([]) }, 5_000_000);
+    await syncMembers({ seerrUsers: seerrUsersReturning([fakeSeerrUser(1, { jellyfinUsername: 'jack' })]) }, 5_000_000);
 
     const quotaRow = getDb().select().from(quotaPolicy).where(eq(quotaPolicy.ssoUsername, 'jack')).get();
-    // Materialising 500_000_000_000 into the row here is exactly the bug this
-    // task fixes: it would mean every future default change needs a
-    // fan-out write to reach jack. The row stays null forever until an
-    // operator sets an explicit override.
     expect(quotaRow).toMatchObject({ source: 'default', quotaBytes: null });
 
-    // The RESOLVED default at creation time is still recorded, for operator
-    // context, in the member.created audit row's `after.defaultQuotaBytes`
-    // — it's just never written into quota_policy itself.
     const auditRows = getDb().select().from(audit).where(eq(audit.targetId, 'jack')).all();
     const after = JSON.parse(auditRows[0].after!);
     expect(after.defaultQuotaBytes).toBe(500_000_000_000);
@@ -235,17 +211,17 @@ describe('syncMembers — quota assignment (FR-SYNC-5, FR-POL-2a: inheritance re
 
   it('DEFAULT_QUOTA_BYTES unset at creation time: quota_policy.quota_bytes is null AND the audit row honestly records null too', async () => {
     expect(process.env.DEFAULT_QUOTA_BYTES).toBeUndefined();
-    await syncMembers({ authentik: authentikReturning([fakeIdentity('gus')]), seerrUsers: seerrUsersReturning([]) }, 5_100_000);
+    await syncMembers({ seerrUsers: seerrUsersReturning([fakeSeerrUser(1, { jellyfinUsername: 'gus' })]) }, 5_100_000);
     const quotaRow = getDb().select().from(quotaPolicy).where(eq(quotaPolicy.ssoUsername, 'gus')).get();
     expect(quotaRow?.source).toBe('default');
     expect(quotaRow?.quotaBytes).toBeNull();
   });
 
-  it('DEFAULT_QUOTA_BYTES=0 at creation time: quota_policy.quota_bytes is STILL null, not 0 — the row never materialises the default\'s value, whatever it is', async () => {
+  it('DEFAULT_QUOTA_BYTES=0 at creation time: quota_policy.quota_bytes is STILL null, not 0', async () => {
     process.env.DEFAULT_QUOTA_BYTES = '0';
     _resetConfigCacheForTests();
 
-    await syncMembers({ authentik: authentikReturning([fakeIdentity('hank')]), seerrUsers: seerrUsersReturning([]) }, 5_200_000);
+    await syncMembers({ seerrUsers: seerrUsersReturning([fakeSeerrUser(1, { jellyfinUsername: 'hank' })]) }, 5_200_000);
     const quotaRow = getDb().select().from(quotaPolicy).where(eq(quotaPolicy.ssoUsername, 'hank')).get();
     expect(quotaRow?.source).toBe('default');
     expect(quotaRow?.quotaBytes).toBeNull();
@@ -255,28 +231,22 @@ describe('syncMembers — quota assignment (FR-SYNC-5, FR-POL-2a: inheritance re
   });
 
   it('raising the global default AFTER a member was created changes their effective quota immediately, with NO write to their quota_policy row', async () => {
-    await syncMembers({ authentik: authentikReturning([fakeIdentity('ivy')]), seerrUsers: seerrUsersReturning([]) }, 5_300_000);
+    await syncMembers({ seerrUsers: seerrUsersReturning([fakeSeerrUser(1, { jellyfinUsername: 'ivy' })]) }, 5_300_000);
     const before = getDb().select().from(quotaPolicy).where(eq(quotaPolicy.ssoUsername, 'ivy')).get()!;
     expect(before.quotaBytes).toBeNull();
     expect(resolveEffectiveQuota(before.quotaBytes, null)).toEqual({ kind: 'unconfigured' });
 
-    // The operator raises the default — via app_setting directly here (the
-    // real setter, src/lib/quota/policy.ts's setGlobalDefaultQuota, is
-    // exercised in test/quota-policy.test.ts; this test only needs to prove
-    // ivy's row is untouched by ANY default change, however it's made).
     getDb().insert(appSetting).values({ key: 'default_quota_bytes', value: JSON.stringify(250_000_000_000), updatedAt: 5_400_000, updatedBy: 'admin' }).run();
 
     const after = getDb().select().from(quotaPolicy).where(eq(quotaPolicy.ssoUsername, 'ivy')).get()!;
-    expect(after).toEqual(before); // byte-for-byte unchanged — no fan-out write happened
+    expect(after).toEqual(before);
     expect(resolveEffectiveQuota(after.quotaBytes, 250_000_000_000)).toEqual({ kind: 'limited', bytes: 250_000_000_000 });
   });
 
   it('never overwrites an operator quota override, even across a later classification change', async () => {
-    const identities = [fakeIdentity('frank')];
     const seerr = [fakeSeerrUser(8, { jellyfinUsername: 'frank' })];
-    await syncMembers({ authentik: authentikReturning(identities), seerrUsers: seerrUsersReturning(seerr) }, 6_000_000);
+    await syncMembers({ seerrUsers: seerrUsersReturning(seerr) }, 6_000_000);
 
-    // Operator sets an override.
     getDb()
       .update(quotaPolicy)
       .set({ quotaBytes: 999_999, source: 'override', note: 'operator bump', updatedAt: 6_100_000, updatedBy: 'admin' })
@@ -284,18 +254,17 @@ describe('syncMembers — quota assignment (FR-SYNC-5, FR-POL-2a: inheritance re
       .run();
 
     // A later cycle that changes frank's classification (loses entitlement) must not touch the override.
-    await syncMembers({ authentik: authentikReturning([]), seerrUsers: seerrUsersReturning(seerr) }, 6_200_000);
+    await syncMembers({ seerrUsers: seerrUsersReturning([]) }, 6_200_000);
 
     const quotaRow = getDb().select().from(quotaPolicy).where(eq(quotaPolicy.ssoUsername, 'frank')).get();
     expect(quotaRow).toMatchObject({ source: 'override', quotaBytes: 999_999 });
   });
 });
 
-describe('syncMembers — failure isolation (FR-SYNC-10): Authentik down must not mass-flip entitlement', () => {
-  it('a previously matched+entitled member is left COMPLETELY untouched when Authentik is unreachable', async () => {
-    const identities = [fakeIdentity('carol')];
+describe('syncMembers — failure isolation (FR-SYNC-10): Seerr down must not mass-flip entitlement', () => {
+  it('a previously matched+entitled member is left COMPLETELY untouched when Seerr is unreachable', async () => {
     const seerr = [fakeSeerrUser(3, { jellyfinUsername: 'carol' })];
-    await syncMembers({ authentik: authentikReturning(identities), seerrUsers: seerrUsersReturning(seerr) }, 7_000_000);
+    await syncMembers({ seerrUsers: seerrUsersReturning(seerr) }, 7_000_000);
 
     const before = getDb().select().from(member).where(eq(member.ssoUsername, 'carol')).get();
     expect(before?.entitled).toBe(true);
@@ -303,79 +272,147 @@ describe('syncMembers — failure isolation (FR-SYNC-10): Authentik down must no
 
     const auditCountBefore = getDb().select().from(audit).all().length;
 
-    // Authentik is down this cycle.
-    const result = await syncMembers(
-      { authentik: authentikThatFails('connect ETIMEDOUT auth.example.com'), seerrUsers: seerrUsersReturning(seerr) },
-      7_900_000,
-    );
-
-    expect(result.identity.ok).toBe(false);
-    expect(result.classify.ok).toBe(false);
-    expect(result.classify.error).toMatch(/skipped/);
-
-    // carol's row is byte-for-byte unchanged — NOT flipped to not_entitled, lastSyncedAt did NOT advance.
-    const after = getDb().select().from(member).where(eq(member.ssoUsername, 'carol')).get();
-    expect(after).toEqual(before);
-
-    // sync_run recorded the failure, honestly.
-    const runRow = getDb().select().from(syncRun).where(eq(syncRun.id, result.syncRunId)).get();
-    expect(runRow?.ok).toBe(false);
-    const steps = JSON.parse(runRow!.steps);
-    expect(steps.identity.ok).toBe(false);
-
-    // A sync.failed audit row was written (the failure is loud)...
-    const failedRows = getDb().select().from(audit).where(eq(audit.action, 'sync.failed')).all();
-    expect(failedRows.length).toBeGreaterThan(0);
-    // ...but NO member.* audit rows were added — nothing about carol (or anyone) was reclassified.
-    const auditCountAfter = getDb().select().from(audit).all().length;
-    expect(auditCountAfter).toBe(auditCountBefore + failedRows.length);
-    const carolAuditRows = getDb().select().from(audit).where(eq(audit.targetId, 'carol')).all();
-    expect(carolAuditRows).toHaveLength(1); // only the original member.created from the first successful sync
-  });
-
-  it('Seerr users unreachable also aborts classify+upsert entirely (not just the Authentik half)', async () => {
-    const identities = [fakeIdentity('jack')];
-    const seerr = [fakeSeerrUser(7, { jellyfinUsername: 'jack' })];
-    await syncMembers({ authentik: authentikReturning(identities), seerrUsers: seerrUsersReturning(seerr) }, 8_000_000);
-    const before = getDb().select().from(member).where(eq(member.ssoUsername, 'jack')).get();
-
-    const result = await syncMembers(
-      { authentik: authentikReturning(identities), seerrUsers: seerrUsersThatFail('connect ECONNREFUSED jellyseerr:5055') },
-      8_900_000,
-    );
+    const result = await syncMembers({ seerrUsers: seerrUsersThatFail('connect ECONNREFUSED jellyseerr:5055') }, 7_900_000);
 
     expect(result.seerrUsers.ok).toBe(false);
     expect(result.classify.ok).toBe(false);
+    expect(result.classify.error).toMatch(/skipped/);
 
-    const after = getDb().select().from(member).where(eq(member.ssoUsername, 'jack')).get();
-    expect(after).toEqual(before); // untouched — not reclassified to no_seerr_account just because Seerr was briefly unreachable
+    const after = getDb().select().from(member).where(eq(member.ssoUsername, 'carol')).get();
+    expect(after).toEqual(before); // byte-for-byte unchanged
+
+    const runRow = getDb().select().from(syncRun).where(eq(syncRun.id, result.syncRunId)).get();
+    expect(runRow?.ok).toBe(false);
+    const steps = JSON.parse(runRow!.steps);
+    expect(steps.seerr_users.ok).toBe(false);
+
+    const failedRows = getDb().select().from(audit).where(eq(audit.action, 'sync.failed')).all();
+    expect(failedRows.length).toBeGreaterThan(0);
+    const auditCountAfter = getDb().select().from(audit).all().length;
+    expect(auditCountAfter).toBe(auditCountBefore + failedRows.length);
+    const carolAuditRows = getDb().select().from(audit).where(eq(audit.targetId, 'carol')).all();
+    expect(carolAuditRows).toHaveLength(1); // only the original member.created
   });
 });
 
-describe('syncMembers — is_operator (FR-ENF-6), real group data (admin -> admins)', () => {
-  it('persists is_operator=true for a member whose Authentik groups_obj includes ADMIN_GROUP (default: admins)', async () => {
-    const identities = [fakeIdentity('admin', { groupNames: ['admins'] }), fakeIdentity('carol', { groupNames: ['friends'] })];
-    await syncMembers({ authentik: authentikReturning(identities), seerrUsers: seerrUsersReturning([]) }, 9_000_000);
+describe('syncMembers — is_operator (FR-ENF-6, background half: ADMIN_USERS only — no groups header off-request)', () => {
+  it('persists is_operator=true for an EXISTING member row already linked to a Seerr account whose key is in ADMIN_USERS (default ADMIN_USERS=admin)', async () => {
+    // `admin` can never be auto-created as a NEW row via classify (its key
+    // collides with ADMIN_USERS — see the next test) — so this test seeds
+    // the already-linked row directly, as if it had been established some
+    // other way (e.g. before ADMIN_USERS named it), and verifies isOperator
+    // gets (re)computed correctly on an ordinary sync of an EXISTING link.
+    getDb().insert(member).values({ ssoUsername: 'admin', entitled: true, isOperator: false, seerrUserId: 1, syncStatus: 'matched', firstSeenAt: 9_000_000, lastSyncedAt: 9_000_000 }).run();
 
+    await syncMembers({ seerrUsers: seerrUsersReturning([fakeSeerrUser(1, { jellyfinUsername: 'admin', username: null })]) }, 9_100_000);
     const admin = getDb().select().from(member).where(eq(member.ssoUsername, 'admin')).get();
-    const carol = getDb().select().from(member).where(eq(member.ssoUsername, 'carol')).get();
-    expect(admin?.isOperator).toBe(true);
-    expect(carol?.isOperator).toBe(false);
-  });
-
-  it('persists is_operator=true for a member whose USERNAME is in ADMIN_USERS, even with no admin group (default ADMIN_USERS=admin)', async () => {
-    const identities = [fakeIdentity('admin', { groupNames: [] })];
-    await syncMembers({ authentik: authentikReturning(identities), seerrUsers: seerrUsersReturning([]) }, 9_100_000);
-
-    const admin = getDb().select().from(member).where(eq(member.ssoUsername, 'admin')).get();
+    expect(admin?.seerrUserId).toBe(1);
     expect(admin?.isOperator).toBe(true);
   });
 
-  it('a member outside ADMIN_USERS/ADMIN_GROUP has is_operator=false', async () => {
-    const identities = [fakeIdentity('gus', { groupNames: [] })];
-    await syncMembers({ authentik: authentikReturning(identities), seerrUsers: seerrUsersReturning([]) }, 9_200_000);
+  it('FIX (second security review, item A): a SINGLE brand-new Seerr account whose derived key matches ADMIN_USERS maps normally — no fresh-install lockout', async () => {
+    await syncMembers({ seerrUsers: seerrUsersReturning([fakeSeerrUser(1, { jellyfinUsername: null, username: 'admin' })]) }, 9_100_000);
+
+    const adminRow = getDb().select().from(member).where(eq(member.ssoUsername, 'admin')).get();
+    expect(adminRow).toBeDefined();
+    expect(adminRow?.syncStatus).toBe('matched');
+    expect(adminRow?.entitled).toBe(true);
+    expect(adminRow?.seerrUserId).toBe(1);
+    expect(adminRow?.isOperator).toBe(true);
+
+    const ambiguousRow = getDb().select().from(member).where(eq(member.ssoUsername, 'seerr:1')).get();
+    expect(ambiguousRow).toBeUndefined(); // no fallback row needed — the key resolved normally
+  });
+
+  it('a member outside ADMIN_USERS has is_operator=false, even if they would be in ADMIN_GROUP at request time', async () => {
+    await syncMembers({ seerrUsers: seerrUsersReturning([fakeSeerrUser(1, { jellyfinUsername: null, username: 'gus' })]) }, 9_200_000);
 
     const gus = getDb().select().from(member).where(eq(member.ssoUsername, 'gus')).get();
     expect(gus?.isOperator).toBe(false);
+  });
+});
+
+describe('syncMembers — mass-revocation refusal (FR-SYNC-10, security review PR #17 item 5)', () => {
+  it('refuses to apply (and records sync.failed) when Seerr returns an empty list while entitled members exist — member table untouched', async () => {
+    const seerr = [fakeSeerrUser(1, { jellyfinUsername: 'dana' }), fakeSeerrUser(2, { jellyfinUsername: 'erin' })];
+    await syncMembers({ seerrUsers: seerrUsersReturning(seerr) }, 10_000_000);
+    const before = getDb().select().from(member).all();
+    expect(before.every((m) => m.entitled)).toBe(true);
+
+    const result = await syncMembers({ seerrUsers: seerrUsersReturning([]) }, 10_100_000);
+    expect(result.classify.ok).toBe(false);
+    expect(result.classify.error).toContain('empty user list');
+
+    const after = getDb().select().from(member).all();
+    expect(after).toEqual(before); // completely untouched
+
+    const failedRows = getDb().select().from(audit).where(eq(audit.action, 'sync.failed')).all();
+    expect(failedRows.length).toBeGreaterThan(0);
+  });
+
+  it('refuses to apply when more than half of >2 entitled members would flip to not_entitled in one cycle', async () => {
+    const seerr = [1, 2, 3, 4].map((id) => fakeSeerrUser(id, { jellyfinUsername: `user${id}` }));
+    await syncMembers({ seerrUsers: seerrUsersReturning(seerr) }, 10_200_000);
+    const before = getDb().select().from(member).all();
+    expect(before).toHaveLength(4);
+
+    // Next cycle: 3 of 4 (75%) disappear from Seerr's list.
+    const result = await syncMembers({ seerrUsers: seerrUsersReturning([fakeSeerrUser(1, { jellyfinUsername: 'user1' })]) }, 10_300_000);
+    expect(result.classify.ok).toBe(false);
+    expect(result.classify.error).toContain('3 of 4');
+
+    const after = getDb().select().from(member).all();
+    expect(after).toEqual(before);
+  });
+
+  it('a normal small household losing one of three members is NOT refused — applies normally', async () => {
+    const seerr = [1, 2, 3].map((id) => fakeSeerrUser(id, { jellyfinUsername: `user${id}` }));
+    await syncMembers({ seerrUsers: seerrUsersReturning(seerr) }, 10_400_000);
+
+    const result = await syncMembers({ seerrUsers: seerrUsersReturning(seerr.slice(0, 2)) }, 10_500_000);
+    expect(result.classify.ok).toBe(true);
+
+    const user3 = getDb().select().from(member).where(eq(member.ssoUsername, 'user3')).get();
+    expect(user3?.entitled).toBe(false);
+    expect(user3?.syncStatus).toBe('not_entitled');
+  });
+
+  it('SHOULD-FIX 2: forceApply overrides the flip thresholds (never an empty list) for exactly one cycle, applies the cycle, and audits sync.forced with the operator as actor', async () => {
+    const seerr = [fakeSeerrUser(1, { jellyfinUsername: 'dana' }), fakeSeerrUser(2, { jellyfinUsername: 'erin' })];
+    await syncMembers({ seerrUsers: seerrUsersReturning(seerr) }, 10_600_000);
+
+    // Refused without the override: every linked member vanishes at once.
+    const unrelated = [fakeSeerrUser(9, { jellyfinUsername: 'zed' })];
+    const refused = await syncMembers({ seerrUsers: seerrUsersReturning(unrelated) }, 10_700_000);
+    expect(refused.classify.ok).toBe(false);
+
+    // Forcing never applies an EMPTY list (third security review, PR #17).
+    const forcedEmpty = await syncMembers({ seerrUsers: seerrUsersReturning([]) }, 10_750_000, { forceApply: true, forcedBy: 'admin' });
+    expect(forcedEmpty.classify.ok).toBe(false);
+    expect(getDb().select().from(audit).where(eq(audit.action, 'sync.forced')).all()).toHaveLength(0);
+
+    // Forced: applies the large flip anyway.
+    const forced = await syncMembers({ seerrUsers: seerrUsersReturning(unrelated) }, 10_800_000, { forceApply: true, forcedBy: 'admin' });
+    expect(forced.classify.ok).toBe(true);
+
+    const rows = getDb().select().from(member).all();
+    expect(rows.filter((r) => r.ssoUsername === 'dana' || r.ssoUsername === 'erin').every((r) => r.entitled === false)).toBe(true);
+
+    const forcedAudit = getDb().select().from(audit).where(eq(audit.action, 'sync.forced')).all();
+    expect(forcedAudit).toHaveLength(1);
+    expect(forcedAudit[0].actor).toBe('admin');
+    expect(forcedAudit[0].actorRole).toBe('operator');
+    expect(forcedAudit[0].outcome).toBe('ok');
+  });
+
+  it('forceApply with no prior refusal still applies normally and still audits sync.forced (the override is unconditional for that one call)', async () => {
+    const result = await syncMembers(
+      { seerrUsers: seerrUsersReturning([fakeSeerrUser(1, { jellyfinUsername: 'dana' })]) },
+      10_900_000,
+      { forceApply: true, forcedBy: 'admin' },
+    );
+    expect(result.classify.ok).toBe(true);
+    const forcedAudit = getDb().select().from(audit).where(eq(audit.action, 'sync.forced')).all();
+    expect(forcedAudit).toHaveLength(1);
   });
 });

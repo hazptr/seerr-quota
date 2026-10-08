@@ -29,24 +29,66 @@ import { index, integer, primaryKey, sqliteTable, text, uniqueIndex } from 'driz
 // ---------------------------------------------------------------------------
 // member — one row per person known to the system (wiki/Data-Model.md §member)
 // ---------------------------------------------------------------------------
-export const member = sqliteTable('member', {
-  /** Authentik username, lowercase. PK — the one identifier stable across Authentik → LDAP → Jellyfin → Seerr. */
+export const member = sqliteTable(
+  'member',
+  {
+  /**
+   * Forward-auth login username, lowercase. PK — the stable identifier every
+   * `claim`/`deletion`/`audit`/`quota_policy`/`request_decision` row keys
+   * off of. CRITICAL (0.2.0): once a member row is linked to a Seerr
+   * account (`seerr_user_id` set), this value must never be changed by sync
+   * — see `src/lib/members/classify.ts`'s header comment on key stability.
+   * Before 0.2.0 this was always the Authentik username; since 0.2.0 it is
+   * whatever the forward-auth proxy's `AUTH_USER_HEADER` sends (any IdP),
+   * normalized the same way.
+   */
   ssoUsername: text('sso_username').primaryKey(),
-  /** For stable re-matching if a username is ever changed. */
+  /**
+   * DEPRECATED (0.2.0): was "for stable re-matching if a username is ever
+   * changed" under the Authentik-entitlement sync. The roster now comes
+   * straight from Seerr (`member.seerr_user_id` is the stable re-match key
+   * instead — see `src/lib/members/classify.ts`), so this column is never
+   * written by current code. Kept, not dropped (additive-only schema,
+   * AGENTS.md rule 10) — old rows may still carry a value from before the
+   * 0.2.0 cutover, and it stays harmless to read.
+   */
   authentikUuid: text('authentik_uuid'),
-  /** Authentik `name`. */
+  /** Display name — sourced from Seerr's `displayName`/`username` since 0.2.0 (was Authentik `name`). */
   displayName: text('display_name'),
-  /** Authentik email; the fallback match key. */
+  /** Email — sourced from Seerr since 0.2.0 (was Authentik email). Still the fallback header-based login match key (`src/lib/auth/memberGate.ts`). */
   email: text('email'),
-  /** Has the `jellyseerr` application binding in Authentik. */
+  /**
+   * Since 0.2.0: has a Seerr account (the roster source is Seerr itself, so
+   * every known Seerr user is entitled; a member whose Seerr account
+   * disappeared is flipped to `false` and kept, never deleted). Before
+   * 0.2.0 this meant "has the `jellyseerr` application binding in
+   * Authentik" — the column's meaning changed, not its shape.
+   */
   entitled: integer('entitled', { mode: 'boolean' }).notNull().default(false),
-  /** In the `admins` group, or listed in `ADMIN_USERS`. */
+  /**
+   * `ADMIN_USERS`, or (request-time only — see `src/lib/auth/identity.ts`)
+   * in `ADMIN_GROUP` via the forward-auth groups header. This column itself
+   * is recomputed by `src/lib/members/sync.ts` from `ADMIN_USERS` ONLY
+   * (`FR-ENF-6`'s background/enforcement-exemption half) — no groups header
+   * exists off-request, so an `ADMIN_GROUP`-only admin is NOT reflected
+   * here and stays subject to enforcement unless also in `ADMIN_USERS` or
+   * given an unlimited quota override (see `wiki/Configuration.md`).
+   */
   isOperator: integer('is_operator', { mode: 'boolean' }).notNull().default(false),
   /** Seerr `user.id`; null = no Seerr account yet. */
   seerrUserId: integer('seerr_user_id'),
   /** Jellyfin GUID, normalised (no dashes, lowercase). */
   jellyfinUserId: text('jellyfin_user_id'),
-  /** `matched` / `no_seerr_account` / `not_entitled` / `ambiguous`. */
+  /**
+   * `matched` / `no_seerr_account` / `not_entitled` / `ambiguous`. Since
+   * 0.2.0 (roster = Seerr directly), a current Seerr user is always
+   * `matched` — `no_seerr_account` can no longer be PRODUCED for a new row
+   * (it required a separate IdP-entitlement source with no Seerr account to
+   * match against), but the value is kept in the enum (additive-only) so a
+   * pre-0.2.0 row carrying it still reads back fine. `ambiguous` can still
+   * occur in the rare case of two Seerr accounts deriving the same orphan
+   * key (see `src/lib/members/classify.ts`).
+   */
   syncStatus: text('sync_status', {
     enum: ['matched', 'no_seerr_account', 'not_entitled', 'ambiguous'],
   })
@@ -60,7 +102,24 @@ export const member = sqliteTable('member', {
   firstSeenAt: integer('first_seen_at').notNull(),
   /** Unix seconds. */
   lastSyncedAt: integer('last_synced_at').notNull(),
-});
+  /**
+   * Added 0.2.0 (`src/lib/auth/memberGate.ts`, FR-SSO-9-ish email-fallback
+   * resolution). `null` until a forward-auth login header username is ever
+   * resolved to this member via the configured email header rather than an
+   * exact `sso_username` match — recorded the FIRST time that happens so
+   * every later login from the same proxy-issued username resolves
+   * instantly by alias instead of re-running the email search. Unique when
+   * non-null (enforced by `memberLoginAliasUniqueIdx` below) and MUST NEVER
+   * equal another member's `sso_username` or `login_alias` — both are
+   * checked before writing (`src/lib/auth/memberGate.ts`).
+   */
+  loginAlias: text('login_alias'),
+  },
+  (t) => ({
+    /** SQLite treats multiple `NULL`s as distinct, so this only constrains the non-null aliases actually in use — exactly what we want (`null` is "no alias yet", not a value to dedupe). */
+    loginAliasUniqueIdx: uniqueIndex('member_login_alias_unique_idx').on(t.loginAlias),
+  }),
+);
 
 // ---------------------------------------------------------------------------
 // quota_policy (wiki/Data-Model.md §quota_policy)

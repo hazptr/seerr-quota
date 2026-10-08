@@ -28,15 +28,29 @@ import { NextResponse } from 'next/server';
 import { getDb } from '@/lib/db';
 import { newCorrelationId, writeAuditRow, type Source, type TargetType } from '@/lib/audit';
 import { getIdentity } from './session';
+import { getMemberGate } from './memberGate';
 import type { Identity } from './identity';
+
+/**
+ * `reason` (second security review, PR #17, SHOULD-FIX) distinguishes WHICH
+ * 403 this is, so `toAuthErrorResponse` can give the client an accurate
+ * message instead of always saying "operator only" — a `not_active_member`
+ * 403 (from `requireEntitledMember`/`requireEntitledMemberOrOperator`) is
+ * NOT an operator-only route; saying so would actively mislead a
+ * `not_entitled`/deactivated member about why they were refused. Defaults
+ * to `'operator_only'` for `requireOperator`'s existing callers.
+ */
+export type AuthErrorReason = 'operator_only' | 'not_active_member';
 
 export class AuthError extends Error {
   readonly status: 401 | 403;
+  readonly reason: AuthErrorReason;
 
-  constructor(status: 401 | 403, message: string) {
+  constructor(status: 401 | 403, message: string, reason: AuthErrorReason = 'operator_only') {
     super(message);
     this.name = 'AuthError';
     this.status = status;
+    this.reason = reason;
   }
 }
 
@@ -90,6 +104,54 @@ export async function requireOperator(ctx: AccessCheckContext): Promise<Identity
   return identity;
 }
 
+/**
+ * Security review (PR #17): self-service DESTRUCTIVE routes (deletion
+ * schedule/execute/cancel) must re-check that the caller is a currently
+ * `matched`/entitled member — not just "some identity resolved" — before
+ * authorizing anything. `requireIdentity` alone is not enough here: it
+ * happily returns an `Identity` for a login with no `member` row at all,
+ * or one whose `sync_status` isn't `matched` (e.g. `not_entitled` — a
+ * deactivated/departed member whose OLD claims are still sitting in the
+ * `claim` table from before they lost entitlement), and the page-level
+ * FR-SSO-8 gate that would normally stop such a person from ever reaching
+ * the delete UI is NOT itself re-checked by the API route underneath it.
+ * Throws the SAME `AuthError(403)` shape as `requireOperator`, with the
+ * SAME `access.denied` audit row written first.
+ */
+export async function requireEntitledMember(ctx: AccessCheckContext): Promise<Identity> {
+  const identity = await requireIdentity();
+  const gate = await getMemberGate(identity);
+  if (gate.status !== 'ok') {
+    recordAccessDenied(identity, ctx);
+    throw new AuthError(403, `forbidden: not a currently matched/entitled member (${ctx.route})`, 'not_active_member');
+  }
+  return identity;
+}
+
+/**
+ * Same intent as `requireEntitledMember`, but an operator bypasses the
+ * member-gate check entirely. Used by `/api/deletion/cancel` (security
+ * review, PR #17): that route's own authority model is "owner OR operator"
+ * (`cancelScheduledDeletion` re-derives this from the `deletion` row
+ * itself, not from this check) — an operator whose OWN `member` row isn't
+ * `matched` (e.g. a service-account-shaped `ADMIN_USERS` entry with no
+ * Seerr account of its own) must still be able to cancel another member's
+ * scheduled deletion (`FR-DEL-28`). A non-operator calling this route is
+ * always acting on their OWN scheduled deletions, so the entitled-member
+ * check still applies to them exactly as it does to `/api/deletion/
+ * execute`.
+ */
+export async function requireEntitledMemberOrOperator(ctx: AccessCheckContext): Promise<Identity> {
+  const identity = await requireIdentity();
+  if (identity.isOperator) return identity;
+  const gate = await getMemberGate(identity);
+  if (gate.status !== 'ok') {
+    recordAccessDenied(identity, ctx);
+    throw new AuthError(403, `forbidden: not a currently matched/entitled member (${ctx.route})`, 'not_active_member');
+  }
+  return identity;
+}
+
 function recordAccessDenied(identity: Identity, ctx: AccessCheckContext): void {
   const db = getDb();
   writeAuditRow(db, {
@@ -127,10 +189,18 @@ function recordAccessDenied(identity: Identity, ctx: AccessCheckContext): void {
  * Rethrows anything that isn't an `AuthError` — this function only knows how
  * to translate the error shape it itself defines, never swallows an
  * unrelated failure.
+ *
+ * The client-facing message distinguishes `reason` (second security review,
+ * PR #17): `'operator_only'` -> "forbidden: operator only" (unchanged);
+ * `'not_active_member'` -> "forbidden: not an active member" — a
+ * `not_entitled`/deactivated member hitting a self-service route is not
+ * being told "operator only", which would actively mislead them about why
+ * they were refused.
  */
 export function toAuthErrorResponse(err: unknown): NextResponse {
   if (err instanceof AuthError) {
-    return NextResponse.json({ error: err.status === 401 ? 'unauthorized' : 'forbidden: operator only' }, { status: err.status });
+    const message = err.status === 401 ? 'unauthorized' : err.reason === 'not_active_member' ? 'forbidden: not an active member' : 'forbidden: operator only';
+    return NextResponse.json({ error: message }, { status: err.status });
   }
   throw err;
 }

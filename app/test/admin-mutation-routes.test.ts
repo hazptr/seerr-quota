@@ -43,6 +43,7 @@ const { POST: unprotectPOST } = await import('@/app/api/admin/titles/unprotect/r
 const { POST: settingsPOST } = await import('@/app/api/admin/settings/route');
 const { POST: enforcementPOST } = await import('@/app/api/admin/settings/enforcement/route');
 const { GET: enforcementPreviewGET } = await import('@/app/api/admin/settings/enforcement/preview/route');
+const { POST: clearAliasPOST } = await import('@/app/api/admin/members/clear-alias/route');
 
 const ORIGINAL_ENV = { ...process.env };
 const OPERATOR = 'admin';
@@ -108,6 +109,7 @@ describe('every P2-5 mutation route: a member posting directly gets 403 and an a
     { name: 'POST /api/admin/settings', call: () => settingsPOST(postJson('http://x/api/admin/settings', { key: 'hold_max_days', value: 10 })) },
     { name: 'POST /api/admin/settings/enforcement', call: () => enforcementPOST(postJson('http://x/api/admin/settings/enforcement', { enabled: true })) },
     { name: 'GET /api/admin/settings/enforcement/preview', call: () => enforcementPreviewGET(new NextRequest('http://x/api/admin/settings/enforcement/preview') as never) },
+    { name: 'POST /api/admin/members/clear-alias', call: () => clearAliasPOST(postJson('http://x/api/admin/members/clear-alias', { ssoUsername: 'erin' })) },
   ];
 
   for (const { name, call } of cases) {
@@ -298,5 +300,116 @@ describe('POST /api/admin/settings/enforcement + GET .../preview', () => {
     expect(JSON.parse(row.value)).toBe(true);
     const rows = getDb().select().from(audit).where(eq(audit.action, 'enforcement.toggled')).all();
     expect(rows).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// members/clear-alias (security review, PR #17)
+// ---------------------------------------------------------------------------
+
+describe('POST /api/admin/members/clear-alias', () => {
+  it('404s an unknown member', async () => {
+    asOperator();
+    const res = await clearAliasPOST(postJson('http://x/api/admin/members/clear-alias', { ssoUsername: 'ghost' }));
+    expect(res.status).toBe(404);
+  });
+
+  it('400s a blank ssoUsername', async () => {
+    asOperator();
+    const res = await clearAliasPOST(postJson('http://x/api/admin/members/clear-alias', { ssoUsername: '   ' }));
+    expect(res.status).toBe(400);
+  });
+
+  it('operator: clears an existing alias and writes member.alias_cleared', async () => {
+    asOperator();
+    insertMember('erin');
+    getDb().update(member).set({ loginAlias: 'erin-newidp' }).where(eq(member.ssoUsername, 'erin')).run();
+
+    const res = await clearAliasPOST(postJson('http://x/api/admin/members/clear-alias', { ssoUsername: 'erin' }));
+    expect(res.status).toBe(200);
+
+    const row = getDb().select().from(member).where(eq(member.ssoUsername, 'erin')).get();
+    expect(row?.loginAlias).toBeNull();
+
+    const rows = getDb().select().from(audit).where(eq(audit.action, 'member.alias_cleared')).all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].targetId).toBe('erin');
+    expect(rows[0].actor).toBe(OPERATOR);
+    expect(rows[0].actorRole).toBe('operator');
+  });
+
+  it('operator: clearing a member who already has no alias still succeeds and audits (idempotent)', async () => {
+    asOperator();
+    insertMember('erin');
+    const res = await clearAliasPOST(postJson('http://x/api/admin/members/clear-alias', { ssoUsername: 'erin' }));
+    expect(res.status).toBe(200);
+    const rows = getDb().select().from(audit).where(eq(audit.action, 'member.alias_cleared')).all();
+    expect(rows).toHaveLength(1);
+  });
+
+  // --- Second security review (PR #17), SHOULD-FIX: lowercase input + transaction + target ---
+
+  it('lowercases a differently-cased ssoUsername before looking it up — a mixed-case input still finds the (lowercase-stored) row', async () => {
+    asOperator();
+    insertMember('erin');
+    getDb().update(member).set({ loginAlias: 'erin-newidp' }).where(eq(member.ssoUsername, 'erin')).run();
+
+    const res = await clearAliasPOST(postJson('http://x/api/admin/members/clear-alias', { ssoUsername: 'ERIN' }));
+    expect(res.status).toBe(200);
+    expect(getDb().select().from(member).where(eq(member.ssoUsername, 'erin')).get()?.loginAlias).toBeNull();
+  });
+
+  it('a member posting directly records the SPECIFIC member targeted, not just the bare route (requireOperatorForRoute target)', async () => {
+    asMember();
+    insertMember('erin');
+    const res = await clearAliasPOST(postJson('http://x/api/admin/members/clear-alias', { ssoUsername: 'erin' }));
+    expect(res.status).toBe(403);
+    const denied = getDb().select().from(audit).where(eq(audit.action, 'access.denied')).all();
+    const match = denied.find((r) => r.actor === MEMBER && r.targetId === 'erin');
+    expect(match).toBeDefined();
+    expect(match?.targetType).toBe('member');
+  });
+
+  it('a non-operator cannot write attacker-controlled data into the audit table via the pre-auth peek', async () => {
+    asMember();
+    const huge = 'x'.repeat(200_000);
+    const res = await clearAliasPOST(postJson('http://x/api/admin/members/clear-alias', { ssoUsername: huge }));
+    expect(res.status).toBe(403);
+    const denied = getDb().select().from(audit).where(eq(audit.action, 'access.denied')).all();
+    expect(denied.length).toBeGreaterThan(0);
+    for (const r of denied) {
+      expect(r.targetId ?? '').not.toContain('xxxx');
+      expect(JSON.stringify(r).length).toBeLessThan(5_000);
+    }
+  });
+
+  it('a non-operator naming a member that does not exist records no target', async () => {
+    asMember();
+    const res = await clearAliasPOST(postJson('http://x/api/admin/members/clear-alias', { ssoUsername: 'nobody-here' }));
+    expect(res.status).toBe(403);
+    const denied = getDb().select().from(audit).where(eq(audit.action, 'access.denied')).all();
+    expect(denied.some((r) => r.targetId === 'nobody-here')).toBe(false);
+  });
+
+  it('a malformed JSON body still 403s a non-operator (auth is checked first; the pre-auth body peek is tolerant of garbage, never itself 400s)', async () => {
+    asMember();
+    const req = new NextRequest('http://x/api/admin/members/clear-alias', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{not json' });
+    const res = await clearAliasPOST(req);
+    expect(res.status).toBe(403);
+  });
+
+  it('the write and its audit row commit atomically — a second lookup immediately after shows both changed together', async () => {
+    asOperator();
+    insertMember('erin');
+    getDb().update(member).set({ loginAlias: 'erin-newidp' }).where(eq(member.ssoUsername, 'erin')).run();
+
+    await clearAliasPOST(postJson('http://x/api/admin/members/clear-alias', { ssoUsername: 'erin' }));
+
+    const row = getDb().select().from(member).where(eq(member.ssoUsername, 'erin')).get();
+    const auditRows = getDb().select().from(audit).where(eq(audit.action, 'member.alias_cleared')).all();
+    // Both reflect the SAME post-transaction state — proves this wasn't two
+    // independent statements that could commit (or fail) separately.
+    expect(row?.loginAlias).toBeNull();
+    expect(auditRows).toHaveLength(1);
   });
 });

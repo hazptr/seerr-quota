@@ -29,6 +29,25 @@ export type AuditAction =
   | 'member.created'
   | 'member.sync_changed'
   | 'member.entitlement_changed'
+  /**
+   * 0.2.0, `src/lib/auth/memberGate.ts`: the FIRST time a forward-auth login
+   * username is resolved to an existing member via the email-header
+   * fallback (no `sso_username` match), recording that username as the
+   * member's `login_alias` so future logins resolve by alias directly.
+   * `target_id` is the member's `sso_username`; `detail` carries the
+   * resolved alias.
+   */
+  | 'member.alias_linked'
+  /** Operator action: clears a member's `login_alias` (`POST /api/admin/members/clear-alias`). Re-linking an alias is a trust decision, so undoing one is explicit and audited, never automatic. */
+  | 'member.alias_cleared'
+  /**
+   * The email-fallback resolution (`src/lib/auth/memberGate.ts`'s
+   * `tryLinkByEmail`) refused to link because the target row already has an
+   * alias, or is an operator/`ADMIN_USERS` row (never auto-linked). Written
+   * at most once per (header username, member) pair — see that file's
+   * dedup check — so a repeat visitor can't fill the log.
+   */
+  | 'member.alias_link_denied'
   | 'quota.set'
   | 'quota.cleared'
   | 'setting.changed'
@@ -62,6 +81,14 @@ export type AuditAction =
   | 'access.denied'
   | 'webhook.rejected'
   | 'sync.failed'
+  /**
+   * Second security review (PR #17), SHOULD-FIX 2: an operator explicitly
+   * overrode `checkMassRevocationRisk`'s refusal for one sync cycle
+   * (`src/lib/members/sync.ts`'s `syncMembers({ forceApply: true, ... })`,
+   * `POST /api/admin/reconcile/force-members-sync`). No target — this
+   * describes the OVERRIDE decision itself, not any one member.
+   */
+  | 'sync.forced'
   | 'invariant.violated';
 
 /**
@@ -73,6 +100,9 @@ export const AUDIT_ACTIONS = [
   'member.created',
   'member.sync_changed',
   'member.entitlement_changed',
+  'member.alias_linked',
+  'member.alias_cleared',
+  'member.alias_link_denied',
   'quota.set',
   'quota.cleared',
   'setting.changed',
@@ -95,6 +125,7 @@ export const AUDIT_ACTIONS = [
   'access.denied',
   'webhook.rejected',
   'sync.failed',
+  'sync.forced',
   'invariant.violated',
 ] as const satisfies readonly AuditAction[];
 
@@ -107,7 +138,7 @@ export const AUDIT_ACTIONS = [
  * type when it did — so `writeAuditRow` (`./write.ts`) requires `targetId` for
  * it but does not force a specific `targetType`.
  */
-const ACTIONS_WITHOUT_TARGET: ReadonlySet<AuditAction> = new Set(['webhook.rejected', 'sync.failed']);
+const ACTIONS_WITHOUT_TARGET: ReadonlySet<AuditAction> = new Set(['webhook.rejected', 'sync.failed', 'sync.forced']);
 
 export function requiresTarget(action: AuditAction): boolean {
   return !ACTIONS_WITHOUT_TARGET.has(action);

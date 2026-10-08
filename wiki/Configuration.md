@@ -19,9 +19,11 @@ client, never in an audit row (`FR-AUD-11`).
 | `RADARR_API_KEY` | Radarr → Settings → General → API Key | Always |
 | `SONARR_API_KEY` | Sonarr → Settings → General → API Key | Always |
 | `JELLYFIN_API_KEY` | Jellyfin admin UI → API Keys (create a dedicated one) | Always (default playback source is `rest`; see below) |
-| `AUTHENTIK_TOKEN` | A **dedicated**, read-only Authentik service-account token — *not* your own admin token (see `wiki/Deployment.md` §3) | Always |
 | `SEERR_WEBHOOK_SECRET` | Generated (e.g. `openssl rand -hex 32`); also pasted into Seerr's webhook config — either an Authorization Header or (preferred) a Custom Headers entry named `X-Seerr-Webhook-Secret` | Always |
 | `SMTP_USER` / `SMTP_PASS` | Your SMTP relay's credentials, for member notifications (`FR-ENF-13`) | Only when `ENFORCEMENT_ENABLED=true` |
+
+Since 0.2.0 there is no identity-provider secret here at all — this app has
+no IdP integration of its own; see "Identity" below.
 
 Copy the keys into `.env` rather than reading another service's config file
 at runtime: the app shouldn't need a bind mount into another service's
@@ -37,21 +39,38 @@ rule 7).
 | `SONARR_URL` | `http://sonarr:8989` | Same |
 | `JELLYFIN_URL` | `http://jellyfin:8096` | Auth header is `X-Emby-Token` |
 | `JELLYFIN_PLAYBACK_SOURCE` | `rest` | `rest` (default — Jellyfin's REST API, needs `JELLYFIN_API_KEY`) or `db` (reads Jellyfin's own SQLite file read-only). **Recommended: `rest`.** `db` only works against a writable mount or a non-WAL copy of Jellyfin's database — against Jellyfin's live WAL-mode database mounted `:ro`, it fails outright (SQLite cannot open a WAL database read-only, since it needs to write the `-shm` file), playback data becomes unavailable, and — by design (`FR-DEL-21`) — every deletion is then blocked, since "unknown" must fail safe, not fail open |
-| `AUTHENTIK_URL` | *(none — required)* | Your identity provider's base URL. No generic default exists; boot fails if unset |
 | `APP_URL` | *(none — required)* | This app's own public URL, used in member notifications and the in-Seerr banner (`FR-BAN-6`, `FR-ENF-3`). No generic default exists; boot fails if unset |
-| `SELF_APP_SLUG` | `seerr-quota` | This app's own Authentik application slug, for the entitlement-drift comparison (`FR-ADM-9`) |
-| `AUTHENTIK_JELLYSEERR_APP_UUID` | *(unset)* | Optional. When set, skips the per-cycle application lookup. If your Authentik config is terraform-managed, this is a natural terraform output |
-| `SEERR_APP_SLUG` | `jellyseerr` | The Authentik slug entitlement is read from — matches Jellyseerr's internal slug even post-rebrand |
 | `SMTP_HOST` | `mail.example.com` *(placeholder)* | Any SMTP relay reachable from the container works — point it at whatever relay you already use |
 | `SMTP_PORT` | `25` | Container-visible port, STARTTLS |
 | `SMTP_FROM` | `quota@example.com` *(placeholder)* | Should be visibly this app, not Seerr — see [[Feature-05-Enforcement]] open questions |
 
 ## Identity
 
+Since 0.2.0 this app has **no identity-provider integration of its own** —
+it trusts whatever forward-auth reverse proxy sits in front of it
+(Authentik, Authelia, oauth2-proxy in front of any OIDC IdP, Pomerium, ...)
+to authenticate the user and set these headers on every request. See
+`examples/forward-auth/` for worked nginx configs per proxy, and
+`wiki/Deployment.md`'s forward-auth section.
+
 | Setting | Default | Notes |
 |---|---|---|
-| `ADMIN_USERS` | *(none — required)* | Comma-separated SSO usernames; also satisfied by membership in `ADMIN_GROUP`. No generic default exists; boot fails if unset or empty |
-| `ADMIN_GROUP` | `admins` | |
+| `ADMIN_USERS` | *(none — required)* | Comma-separated login usernames; also satisfied, AT REQUEST TIME ONLY, by membership in `ADMIN_GROUP` (see below). No generic default exists; boot fails if unset or empty |
+| `ADMIN_GROUP` | *(empty — disabled)* | Request-time only — there is no groups header available to the background enforcement-exemption check (`FR-ENF-6`), so an `ADMIN_GROUP`-only admin stays subject to quota enforcement unless also listed in `ADMIN_USERS` or given an unlimited quota override. Ships disabled: set it to a group your IdP actually uses to mean "operator" before relying on it — see `src/lib/auth/identity.ts`'s `isInAdminGroup` |
+| `AUTH_USER_HEADER` | `Remote-User` | The header carrying the authenticated login username. The proxy MUST overwrite this, unconditionally, on every request |
+| `AUTH_GROUPS_HEADER` | `Remote-Groups` | The header carrying group names, split on both `\|` and `,`. Same unconditional-overwrite requirement |
+| `AUTH_EMAIL_HEADER` | *(empty — disabled)* | Used only for the one-time email-based member-resolution fallback when the header username doesn't exactly match an existing member (`wiki/Feature-01-SSO-Identity.md`). **Ships disabled, and must stay disabled unless you have verified your proxy unconditionally overwrites this exact header on every request** — a header set only "when present" is forgeable by the client, and this fallback can resolve an unauthenticated-for-this-app caller to an existing member's identity. This is NOT automatically true just because a forward-auth gate is in front of you (e.g. Authentik's outpost sets `X-authentik-username`/`X-authentik-groups` by default, not an arbitrary `Remote-Email`) — check your own proxy config. Even when enabled, the resolution never auto-links an operator row or overwrites an existing `login_alias` — see `wiki/Feature-01-SSO-Identity.md` `FR-SSO-9` |
+
+All three header names, plus the validation that applies to them, are
+checked at boot (`src/lib/config.ts`'s `validateConfig`): each configured
+name must be a syntactically valid HTTP header field-name, and the three
+(when `AUTH_EMAIL_HEADER` is set) must be pairwise distinct.
+
+Leftover pre-0.2.0 settings (`AUTHENTIK_URL`, `AUTHENTIK_TOKEN`,
+`SEERR_APP_SLUG`, `SELF_APP_SLUG`, `AUTHENTIK_JELLYSEERR_APP_UUID`) no
+longer exist — the app never reads them. If any are still present in an
+existing deployment's `.env`, boot does NOT fail over it; one deprecation
+line naming them (never their values) is logged instead.
 
 ## Runtime settings (DB-backed, operator-editable)
 
@@ -127,7 +146,7 @@ under, and MUST say exactly which setting is wrong:
 
 - Any missing secret for an upstream it's configured to use.
 - `ADMIN_USERS` empty (nobody could administer it).
-- `AUTHENTIK_URL` or `APP_URL` empty — neither has a sane generic default.
+- `APP_URL` empty — no sane generic default.
 - `enforcement_enabled = true` with SMTP unconfigured — enforcement without a
   way to tell members why they're held is the failure mode `D-4a` exists to
   prevent, so it must not be startable.

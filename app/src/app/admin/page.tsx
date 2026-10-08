@@ -1,6 +1,10 @@
 /**
  * The admin dashboard's main screen (P1-9, `wiki/Feature-07-Admin-Dashboard.md`
- * `FR-ADM-2/3/4/9/13`). Operator-only, enforced server-side (`FR-ADM-1`) via
+ * `FR-ADM-2/3/4/13`). `FR-ADM-9` (the jellyseerr-vs-seerr-quota Authentik
+ * entitlement check) was removed in 0.2.0 along with the rest of the
+ * Authentik integration — the roster is Seerr's own user list now, so
+ * there is no second entitlement list left to drift from. Operator-only,
+ * enforced server-side (`FR-ADM-1`) via
  * `requireOperator` — the SAME guard every other operator-only path in this
  * app uses, so a member hitting this URL directly gets a genuine HTTP 403
  * (via `forbidden()`, `next.config.mjs`'s `experimental.authInterrupts`) and
@@ -25,16 +29,16 @@ import { FleetPane } from '@/components/admin/FleetPane';
 import { MemberTablePane } from '@/components/admin/MemberTablePane';
 import { NeedsAttentionPane } from '@/components/admin/NeedsAttentionPane';
 import { PendingDeletionsPane } from '@/components/member/PendingDeletionsPane';
-import { EntitlementMismatchPane } from '@/components/admin/EntitlementMismatchPane';
 import { ReconcileTrigger } from '@/components/admin/ReconcileTrigger';
+import { ForceMembersSyncControl } from '@/components/admin/ForceMembersSyncControl';
 import { SettingsPane } from '@/components/admin/SettingsPane';
 import { SyncStatusPane } from '@/components/admin/SyncStatusPane';
 import { Pane } from '@/components/ui/Pane';
 import { AuthError, requireOperator } from '@/lib/auth/authorize';
 import { getConfig } from '@/lib/config';
+import { wasMembersSyncRefusedByMassRevocationGuard } from '@/components/admin/logic';
 import type { Identity } from '@/lib/auth/identity';
 import { loadAdminDashboard } from './_data/dashboard';
-import { loadEntitlementMismatch } from './_data/entitlement';
 import { loadPendingDeletions } from './_data/pendingDeletions';
 import { loadCurrentSettings } from './_data/settings';
 
@@ -56,7 +60,7 @@ async function requireOperatorOrRespond(): Promise<Identity> {
 export default async function AdminPage() {
   const identity = await requireOperatorOrRespond();
 
-  const [dashboard, entitlement] = await Promise.all([loadAdminDashboard(), loadEntitlementMismatch()]);
+  const dashboard = await loadAdminDashboard();
   const settings = loadCurrentSettings();
   const { tz: timeZone } = getConfig().display;
 
@@ -71,6 +75,7 @@ export default async function AdminPage() {
             no data yet — first sync in progress
           </p>
           <ReconcileTrigger />
+          {wasMembersSyncRefusedByMassRevocationGuard(dashboard.pipelines) && <ForceMembersSyncControl />}
         </Pane>
       ) : (
         <>
@@ -98,7 +103,7 @@ export default async function AdminPage() {
           <FleetPane fleet={dashboard.fleet} distinctTitleCount={dashboard.fleet.distinctAttributedTitleCount} />
           <NeedsAttentionPane attention={dashboard.attention} />
           <MemberTablePane members={dashboard.members} />
-          <EntitlementMismatchPane result={entitlement} />
+          {wasMembersSyncRefusedByMassRevocationGuard(dashboard.pipelines) && <ForceMembersSyncControl />}
           <SyncStatusPane pipelines={dashboard.pipelines} nowSeconds={dashboard.now} staleAfterSeconds={dashboard.staleAfterSeconds} timeZone={timeZone} />
         </>
       )}

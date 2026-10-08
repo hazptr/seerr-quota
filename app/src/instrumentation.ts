@@ -49,7 +49,20 @@
  */
 export async function register(): Promise<void> {
   if (process.env.NEXT_RUNTIME === 'nodejs') {
-    const { getConfig, assertBootValid, BootValidationFailure } = await import('@/lib/config');
+    const { getConfig, assertBootValid, BootValidationFailure, detectLegacyAuthentikEnv } = await import('@/lib/config');
+
+    // Config contract (0.2.0): an existing deployment's `.env` left over
+    // from before the Authentik integration was removed MUST NOT fail to
+    // boot over it — these names are logged once, never their values, and
+    // never block `assertBootValid` below.
+    const legacyNames = detectLegacyAuthentikEnv(process.env);
+    if (legacyNames.length > 0) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `seerr-quota: ignoring removed Authentik setting(s) still present in the environment: ${legacyNames.join(', ')} (see CHANGELOG.md 0.2.0)`,
+      );
+    }
+
     try {
       assertBootValid(getConfig());
     } catch (err) {

@@ -17,7 +17,8 @@ the ability to get back under their own limit without asking anyone.
 ```
                         ┌────────────────────────────────────────┐
   member's browser ────►│ nginx (reverse proxy) quota.example.com│
-                        │  auth_request ──► Authentik outpost    │
+                        │  forward-auth ──► any IdP (0.2.0: not  │
+                        │  this app's concern which one)         │
                         │  injects Remote-User / Remote-Groups   │
                         └───────────────┬────────────────────────┘
                                         │ proxy network
@@ -42,15 +43,20 @@ the ability to get back under their own limit without asking anyone.
            │          │           │              │
       read/write   read-only   read-only     read-only
            │          │           │              │
-           ▼          ▼           ▼              ▼
-      ┌────────┐ ┌─────────┐ ┌─────────┐  ┌────────────┐
-      │ Seerr  │ │ Radarr  │ │ Jellyfin│  │ Authentik  │
-      │ /api/v1│ │ Sonarr  │ │ /Items  │  │ /api/v3    │
-      │        │ │ /api/v3 │ │ played  │  │ users+apps │
-      └────────┘ └─────────┘ └─────────┘  └────────────┘
+           ▼          ▼           ▼
+      ┌────────┐ ┌─────────┐ ┌─────────┐
+      │ Seerr  │ │ Radarr  │ │ Jellyfin│
+      │ /api/v1│ │ Sonarr  │ │ /Items  │
+      │ users  │ │ /api/v3 │ │ played  │
+      └────────┘ └─────────┘ └─────────┘
        approve/    DELETE on
        decline     user action
 ```
+
+Since 0.2.0 there is no Authentik (or any other IdP) API call from this
+app at all — the member roster comes straight from Seerr's own user list
+(`wiki/Feature-02-Account-Sync.md`), and login identity comes only from
+forward-auth headers the reverse proxy sets (`wiki/Feature-01-SSO-Identity.md`).
 
 Everything upstream is **read-only except two writes**, both of which are
 narrow and audited:
@@ -88,8 +94,7 @@ own deployment.
 
 | Source | Authoritative for | Access |
 |---|---|---|
-| **Authentik** `/api/v3` | Who exists, who is entitled to Seerr | REST, dedicated scoped token (terraform-managed) |
-| **Seerr** `/api/v1` | Requests, requesters, approval state, count quotas | REST, `X-Api-Key` from `configs/jellyseerr/settings.json` → `.env` |
+| **Seerr** `/api/v1` | Who exists (member roster, 0.2.0), requests, requesters, approval state, count quotas | REST, `X-Api-Key` from `configs/jellyseerr/settings.json` → `.env` |
 | **Radarr / Sonarr** `/api/v3` | `sizeOnDisk`, file paths, deletion | REST, API keys from each `config.xml` → `.env` |
 | **Jellyfin** `/Items`, `/Users` | Playback state (played, last-played, in-progress) | REST, API key → `.env` |
 | **seerr-quota** SQLite | Quota policy, attribution snapshot, audit log | local |
@@ -302,23 +307,31 @@ What gets a row: approve, decline, quota change, protect/unprotect, claim
 release, delete (requested / executed / failed, one row each), account
 sync action, and every authorization *denial*. Detail in [[Feature-08-Audit-Log]].
 
-### D-9 — Authentik is the identity source of truth; account sync is **surfaced, not automatic**.
+### D-9 — Seerr is the identity source of truth (0.2.0); account sync is **surfaced, not automatic**.
 
-The chain is `Authentik → LDAP → Jellyfin → Seerr`. A Seerr account only
-materialises when a person first logs into Seerr — so it's normal to have
-entitled members with no Seerr row yet (they haven't logged in), and a Seerr
-row with no matching Authentik member (a Seerr-internal service account, for
-example).
+**Changed in 0.2.0** — this app previously called Authentik's admin API
+directly to determine entitlement (`Authentik → LDAP → Jellyfin → Seerr`,
+matched against Seerr's user list). That integration was removed entirely:
+Seerr's own user list is now the SOLE roster source. Every current Seerr
+user is a member; a Seerr account that disappears flips to `not_entitled`
+and the row is kept, never deleted.
 
-The reconciler enumerates Authentik users with the `jellyseerr` application
-binding, matches them to Seerr users on `jellyfinUsername` (case-insensitive,
-falling back to `email`), and classifies each into: **matched**,
-**entitled-but-no-Seerr-account**, **Seerr-account-not-entitled**, or
-**ambiguous**. The admin dashboard shows the drift.
+Login identity is unrelated to this and unchanged in spirit — it still
+comes only from forward-auth headers the reverse proxy sets
+([[Feature-01-SSO-Identity]]) — but since 0.2.0 this app no longer cares
+which IdP sits behind that proxy, or calls that IdP's API at all.
 
-Auto-provisioning is **not** automatic in v1 — it's a per-user button in the
-admin UI, because creating a Seerr account correctly means going through Seerr's
-Jellyfin-import path and that needs verifying against the live API before it is
+The reconciler enumerates Seerr's users and upserts a `member` row per
+account, re-matching an EXISTING member by `seerr_user_id` (never by
+re-deriving a key from Seerr's current username/email) so a member's login
+key is stable for life once linked — see [[Feature-02-Account-Sync]] for the
+exact algorithm and why that stability matters (it's the PK every `claim`/
+`deletion`/`audit`/`quota_policy`/`request_decision` row is keyed on).
+
+Auto-provisioning a Seerr account for someone who doesn't have one yet is
+**not** automatic in v1 — it's a per-user button in the admin UI, because
+creating a Seerr account correctly means going through Seerr's Jellyfin-
+import path and that needs verifying against the live API before it is
 allowed to run unattended ([[Backlog]] `P2-3`). What is automatic: applying
 the **default quota** to any newly-seen member, so nobody is ever unlimited by
 omission.
@@ -383,8 +396,8 @@ member clicks Request in Seerr
 
 One interval job (`RECONCILE_INTERVAL`, default 15m) doing, in order:
 
-1. **Identity sync** — Authentik users + `jellyseerr` bindings → member table.
-   New members get `DEFAULT_QUOTA_BYTES` (`D-9`).
+1. **Member sync** — Seerr's own user list → member table (0.2.0; see `D-9`).
+   New members get `DEFAULT_QUOTA_BYTES`.
 2. **Library + request sync** — Radarr movies, Sonarr series (`sizeOnDisk`,
    paths) and Seerr requests + requesters. Originally specced as two steps;
    they share a failure boundary and a `sync_run` entry in the implementation
@@ -420,10 +433,12 @@ explain. The intended split, when that day comes:
 
 ## Security posture
 
-- No public surface except through the reverse proxy + Authentik. Loopback bind is the
+- No public surface except through the reverse proxy + whatever forward-auth
+  IdP it's configured with (any of them, since 0.2.0). Loopback bind is the
   backstop.
-- Identity comes **only** from `Remote-User`; a request without it is 401,
-  including on loopback (`FR-SSO-2`).
+- Identity comes **only** from the configured username header (default
+  `Remote-User`); a request without it is 401, including on loopback
+  (`FR-SSO-2`).
 - Admin routes re-check role server-side on every request, never from a
   client-supplied hint (`FR-SSO-5`).
 - All four upstream API keys live in `.env` (git-ignored), never in the DB,

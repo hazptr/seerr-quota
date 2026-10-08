@@ -95,4 +95,40 @@ describe('SeerrUsersClient.listAllUsers', () => {
     expect(err).toBeInstanceOf(UpstreamError);
     expect((err as UpstreamError).code).toBe('invalid_response');
   });
+
+  // --- Security review (PR #17), item 5: fail-safe, never fail-silent on a partial list ---
+
+  it('throws invalid_response rather than returning a SHORT list when the first (and only) page under-reports pageInfo.results', async () => {
+    // Server claims 5 total, but the single page returned has only 2 rows and
+    // signals "no more" by returning an empty results[] would be the normal
+    // end; here it just stops mid-count with a non-empty-but-short page and
+    // pageInfo.results that doesn't match — a misbehaving/inconsistent upstream.
+    const client = clientWithFetch(
+      (async () => jsonResponse(200, { pageInfo: { pages: 1, results: 5 }, results: [realUserRow({ id: 1 }), realUserRow({ id: 2 })] })) as unknown as typeof fetch,
+    );
+    const err = await client.listAllUsers(2).catch((e) => e);
+    expect(err).toBeInstanceOf(UpstreamError);
+    expect((err as UpstreamError).code).toBe('invalid_response');
+  });
+
+  it('throws invalid_response when MAX_PAGES is exhausted without ever reaching pageInfo.results (a looping/pathological upstream)', async () => {
+    // Every page returns exactly 1 row and claims results: 999999999 — the
+    // loop would paginate forever without this safety cap.
+    const fetchImpl = (async () => jsonResponse(200, { pageInfo: { pages: 999999999, results: 999999999 }, results: [realUserRow({ id: 1 })] })) as unknown as typeof fetch;
+    const client = new SeerrUsersClient(
+      new UpstreamClient({ name: 'seerr', baseUrl: 'http://seerr.local', auth: noAuth(), timeoutMs: 5000, retries: 0, fetchImpl }),
+    );
+    const err = await client.listAllUsers(1).catch((e) => e);
+    expect(err).toBeInstanceOf(UpstreamError);
+    expect((err as UpstreamError).code).toBe('invalid_response');
+    expect((err as UpstreamError).message).toContain('MAX_PAGES');
+  });
+
+  it('an empty roster (zero Seerr users at all) is accepted — pageInfo.results: 0 with an empty results[] is a complete, consistent response', async () => {
+    const client = clientWithFetch(
+      (async () => jsonResponse(200, { pageInfo: { pages: 1, results: 0 }, results: [] })) as unknown as typeof fetch,
+    );
+    const users = await client.listAllUsers();
+    expect(users).toEqual([]);
+  });
 });

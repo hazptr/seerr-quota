@@ -34,6 +34,8 @@ export interface MemberDetailHeader {
   isOperator: boolean;
   syncStatus: 'matched' | 'no_seerr_account' | 'not_entitled' | 'ambiguous';
   syncNote: string | null;
+  /** Set once an `AUTH_EMAIL_HEADER` fallback login resolved to this member (`src/lib/auth/memberGate.ts`). Operator-clearable via `POST /api/admin/members/clear-alias` (`member.alias_cleared`) — the alias is a trust decision, so undoing it is an explicit operator action, not automatic. */
+  loginAlias: string | null;
   quota: EffectiveQuota;
   quotaSource: 'default' | 'override' | null;
   quotaNote: string | null;
@@ -130,6 +132,7 @@ function loadHeader(db: SeerrQuotaDb, ssoUsername: string): MemberDetailHeader |
     isOperator: row.isOperator,
     syncStatus: row.syncStatus,
     syncNote: row.syncNote,
+    loginAlias: row.loginAlias,
     quota,
     quotaSource: quotaRow?.source ?? null,
     quotaNote: quotaRow?.note ?? null,

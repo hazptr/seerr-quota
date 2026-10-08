@@ -81,7 +81,14 @@ function insertSyncRun(steps: Record<string, unknown>, startedAt: number, finish
 describe('loadAdminDashboard — no_data before any attribution reconcile has run', () => {
   it('returns no_data when no sync_run exists at all', async () => {
     const result = await loadAdminDashboard(1_000_000);
-    expect(result).toEqual({ kind: 'no_data' });
+    expect(result.kind).toBe('no_data');
+    // `pipelines` is included even in `no_data` (second security review, PR
+    // #17, SHOULD-FIX 2) so the admin page can detect a mass-revocation
+    // refusal before attribution has ever run — see
+    // `wasMembersSyncRefusedByMassRevocationGuard`.
+    if (result.kind === 'no_data') {
+      expect(Array.isArray(result.pipelines)).toBe(true);
+    }
   });
 
   it('still no_data when other pipelines have run but attribution never has', async () => {

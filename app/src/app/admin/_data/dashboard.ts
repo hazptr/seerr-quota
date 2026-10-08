@@ -66,7 +66,7 @@ export function readFreeBytes(mediaFreeSpacePath: string): { freeBytes: number; 
 }
 
 export type AdminDashboardResult =
-  | { kind: 'no_data' }
+  | { kind: 'no_data'; pipelines: PipelineStatus[] }
   | {
       kind: 'ok';
       now: number;
@@ -322,7 +322,12 @@ export async function loadAdminDashboard(nowSeconds: number = Math.floor(Date.no
 
   const attributionPipeline = latestPerPipeline.get('attribution');
   if (!attributionPipeline || attributionPipeline.finishedAt === null) {
-    return { kind: 'no_data' };
+    // `pipelines` is included even here (not just the `'ok'` branch) so the
+    // admin page can detect "the last members sync was refused by the
+    // mass-revocation guard" (`wasMembersSyncRefusedByMassRevocationGuard`)
+    // and show the one-shot override control even before attribution has
+    // ever completed a run — second security review, SHOULD-FIX 2.
+    return { kind: 'no_data', pipelines };
   }
 
   const titles = loadTitles(db);

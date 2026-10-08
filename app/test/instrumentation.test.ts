@@ -37,10 +37,8 @@ function validEnv(overrides: Record<string, string | undefined> = {}) {
     RADARR_API_KEY: 'rk',
     SONARR_API_KEY: 'sok',
     JELLYFIN_API_KEY: 'jk',
-    AUTHENTIK_TOKEN: 'ak',
     SEERR_WEBHOOK_SECRET: 'wk',
     ADMIN_USERS: 'admin',
-    AUTHENTIK_URL: 'https://auth.example.com',
     APP_URL: 'https://quota.example.com',
     DB_PATH: path.join(tmpDir, 'seerr-quota.db'),
     ...overrides,
@@ -74,6 +72,27 @@ describe('instrumentation.register() — boot validation actually halts the proc
 
     expect(exitSpy).not.toHaveBeenCalled();
     expect(errorSpy).not.toHaveBeenCalled();
+  });
+
+  it('a leftover pre-0.2.0 AUTHENTIK_* env does NOT fail boot, and logs one deprecation line naming (never valuing) the vars', async () => {
+    process.env = {
+      ...process.env,
+      ...validEnv({ AUTHENTIK_URL: 'https://auth.example.com', AUTHENTIK_TOKEN: 'leftover-super-secret-token' }),
+    };
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const { register } = await import('@/instrumentation');
+    await register();
+
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(errorSpy).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    const message = warnSpy.mock.calls[0][0] as string;
+    expect(message).toContain('AUTHENTIK_URL');
+    expect(message).toContain('AUTHENTIK_TOKEN');
+    expect(message).not.toContain('leftover-super-secret-token');
   });
 
   it('calls process.exit(1) and logs every failing setting on a boot-validation failure', async () => {

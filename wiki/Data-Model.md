@@ -17,40 +17,47 @@ that matters most.
 
 ## `member`
 
-One row per person known to the system. Keyed by Authentik username, because
-that is the only identifier that is stable across the whole chain
-(`Authentik → LDAP → Jellyfin → Seerr`).
+One row per person known to the system. **Changed in 0.2.0**: keyed by the
+forward-auth LOGIN username (`sso_username` is the historical column name;
+the value is whatever `AUTH_USER_HEADER` carries, from any IdP — no longer
+necessarily "Authentik username"). This is the one identifier a long
+production history (`claim`, `deletion`, `audit`, `quota_policy`,
+`request_decision`) is keyed on, so it MUST stay stable once a row is
+linked to a Seerr account — see `src/lib/members/classify.ts`.
 
 | Column | Type | Notes |
 |---|---|---|
-| `sso_username` | text PK | Authentik username, lowercase. For a `not_entitled` orphan with **no** Authentik account (e.g. a Seerr-internal service account), keyed `jellyfinUsername → username → seerr:{id}` instead |
-| `authentik_uuid` | text | For stable re-matching if a username is ever changed |
-| `display_name` | text | Authentik `name` |
-| `email` | text | Authentik email; used as the fallback match key |
-| `entitled` | integer (bool) | Has the `jellyseerr` application binding in Authentik |
-| `is_operator` | integer (bool) | In `ADMIN_GROUP` (default `admins`), or listed in `ADMIN_USERS`. Group membership comes from `groups_obj` on `GET /core/users/` — the same call the sync already makes. **Must agree with `src/lib/auth/identity.ts`'s request-time resolution** — the sync imports that module rather than reimplementing it, so they cannot drift. This flag gates enforcement exemption (`FR-ENF-6`). **Known limitation**: fresh group data is only fetched for currently-entitled identities, so a member who has *lost* entitlement and is carried forward can have operator status granted/revoked by `ADMIN_USERS` but not promptly revoked if it came from a group membership since pulled. Impact is cosmetic — admin routes authorize from the request-time `Remote-Groups`, which is always fresh, and a non-entitled member cannot request media, so the enforcement exemption is moot for them |
-| `seerr_user_id` | integer null | Seerr `user.id`; null = no Seerr account yet |
+| `sso_username` | text PK | Login username, lowercase. For a brand-new member with no linked Seerr account yet, keyed `jellyfinUsername → username → email → seerr:{id}` (in that priority) instead |
+| `authentik_uuid` | text, **deprecated 0.2.0** | Was "for stable re-matching if a username is ever changed" under the removed Authentik integration; never written by current code. `seerr_user_id` is the re-match key now. Kept (additive-only schema) so a pre-0.2.0 row's value still reads back |
+| `display_name` | text | Seerr `displayName`/`username` (was Authentik `name` before 0.2.0) |
+| `email` | text | Seerr email (was Authentik email before 0.2.0); still the fallback LOGIN match key for `src/lib/auth/memberGate.ts`'s email-header resolution |
+| `entitled` | integer (bool) | Since 0.2.0: has a Seerr account. (Was: has the `jellyseerr` application binding in Authentik, before 0.2.0 — same column, different meaning) |
+| `login_alias` | text null, **added 0.2.0** | Set the first time a login username is resolved to this member via the email-header fallback rather than an exact `sso_username` match (`src/lib/auth/memberGate.ts`) — future logins under that username then resolve instantly by alias. Unique when non-null; must never collide with another member's `sso_username` or `login_alias` |
+| `is_operator` | integer (bool) | `ADMIN_USERS` ONLY (`FR-ENF-6`'s background half — no groups header exists off-request, since 0.2.0 there's no Authentik groups fetch to lean on either). **Must agree with `src/lib/auth/identity.ts`'s request-time resolution for the `ADMIN_USERS` half** — the sync imports that module's `isOperatorUser` rather than reimplementing it. The REQUEST-TIME check additionally ORs in `ADMIN_GROUP` from the live groups header, so an `ADMIN_GROUP`-only admin is request-time operator but NOT exempt from background enforcement unless also in `ADMIN_USERS` |
+| `seerr_user_id` | integer null | Seerr `user.id` — since 0.2.0 this is ALSO the key-stability anchor: an existing member already linked here keeps its `sso_username` forever, however Seerr's own username/email for that account changes later |
 | `jellyfin_user_id` | text null | Jellyfin GUID, normalised (no dashes, lowercase) |
-| `sync_status` | text | `matched` / `no_seerr_account` / `not_entitled` / `ambiguous` |
+| `sync_status` | text | `matched` / `no_seerr_account` / `not_entitled` / `ambiguous`. Since 0.2.0, `no_seerr_account` can no longer be produced for a new row (kept in the enum for a pre-0.2.0 row); `ambiguous` now means "two Seerr accounts derive the identical new login key," not an IdP/Seerr cross-match conflict |
 | `last_hold_notified_at` | integer null | Throttles hold notifications (`FR-ENF-14`) |
 | `sync_note` | text null | Why, when status isn't `matched` |
 | `first_seen_at` | integer | Unix seconds |
 | `last_synced_at` | integer | |
 
-Rows are never deleted. A member who loses entitlement flips `entitled = 0` and
-keeps their history — the same "preserve the entry" convention `local.users`
-uses for deactivated Authentik users.
+Rows are never deleted. A member whose Seerr account disappears flips
+`entitled = 0` and keeps their history AND their `seerr_user_id` (not
+nulled) — so a resurfaced account re-links to the same row rather than
+creating a duplicate.
 
-> **Match rule** (`D-9`): Seerr `user.jellyfinUsername` == `sso_username`,
-> case-insensitive. Fall back to `user.email` == `member.email`. If a Seerr row
-> matches two members, or a member matches two Seerr rows, mark **both**
-> `ambiguous`, refuse to attribute anything to them, and surface it loudly in
-> the admin UI. Never guess.
+> **Match rule, 0.2.0** (`D-9`): re-match an EXISTING member by
+> `seerr_user_id` first — this is what makes the key stable across a Seerr-
+> side rename. Only a Seerr user with no linked row derives a brand-new key
+> (`jellyfinUsername` → `username` → `email` → `seerr:{id}`). Two distinct
+> Seerr accounts deriving the identical new key are both refused a link and
+> surfaced as a single `ambiguous` row — never guess which is which.
 
-Expected outcome on a healthy sync: every Authentik member with a Seerr login
-classifies `matched`; an entitled member who has never logged into Seerr
-classifies `no_seerr_account`; a Seerr-internal service account with no
-Authentik counterpart classifies `not_entitled`.
+Expected outcome on a healthy sync, 0.2.0: every current Seerr user
+classifies `matched`. A pre-0.2.0 `no_seerr_account`/`not_entitled` row only
+persists from before this cutover, or (for `not_entitled`) a member whose
+Seerr account has since disappeared.
 
 ---
 

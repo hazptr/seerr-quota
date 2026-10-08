@@ -4,7 +4,7 @@
  * `@/components/member/logic.ts` (AGENTS.md rule 9: "pure core, impure
  * shell") — no I/O, no `Date.now()`, no DB, every input is plain data, so
  * every derivation here is hand-testable. The impure shells that feed these
- * from the DB/Authentik live under `src/app/admin/_data/**`.
+ * from the DB/upstream APIs live under `src/app/admin/_data/**`.
  *
  * Formatting primitives shared with the member view (`formatGB`,
  * `formatTimestamp`, `formatAge`, `computeFreshness`,
@@ -20,6 +20,7 @@
  * `src/components/admin/**`, writes.
  */
 import type { EffectiveQuota } from '@/lib/members/quota';
+import { MASS_REVOCATION_REFUSAL_MARKER } from '@/lib/members/classify';
 import { computeFreshness, type Severity } from '@/components/member/logic';
 
 // ---------------------------------------------------------------------------
@@ -251,7 +252,7 @@ export const ALL_PIPELINE_KINDS: readonly Exclude<PipelineKind, 'unknown'>[] = [
 ];
 
 export const PIPELINE_LABELS: Record<Exclude<PipelineKind, 'unknown'>, string> = {
-  members: 'account sync (identity / seerr accounts / classify)',
+  members: 'account sync (seerr accounts / classify)',
   library_requests: 'library + requests (movies / series / requests)',
   playback: 'playback (Jellyfin)',
   attribution: 'attribution (claims / usage)',
@@ -447,29 +448,10 @@ export function describeDecision(decision: string, reason: string, enforced: boo
 }
 
 // ---------------------------------------------------------------------------
-// Entitlement mismatch (`FR-ADM-9`) — pure set diff between the two Authentik
-// application entitlement sets. Case-insensitive since Authentik usernames
-// are lowercase-by-convention (`src/lib/auth/identity.ts`) but a raw
-// Authentik `username` field is not guaranteed already-lowercased by every
-// caller.
-// ---------------------------------------------------------------------------
-
-export interface EntitlementDiff {
-  /** Entitled to `jellyseerr` (can request) but NOT to this app's own Authentik binding (can't reach the dashboard/self-service) — the harmful direction `FR-ADM-9`'s prose calls out by name. */
-  entitledToSeerrOnly: string[];
-  /** Entitled to this app but not to `jellyseerr` — unusual, but still a mismatch worth a look. */
-  entitledToQuotaOnly: string[];
-}
-
-export function diffEntitlement(seerrUsernames: readonly string[], quotaUsernames: readonly string[]): EntitlementDiff {
-  const seerrSet = new Set(seerrUsernames.map((u) => u.toLowerCase()));
-  const quotaSet = new Set(quotaUsernames.map((u) => u.toLowerCase()));
-  return {
-    entitledToSeerrOnly: [...seerrSet].filter((u) => !quotaSet.has(u)).sort(),
-    entitledToQuotaOnly: [...quotaSet].filter((u) => !seerrSet.has(u)).sort(),
-  };
-}
-
+// `FR-ADM-9` (the jellyseerr-vs-seerr-quota Authentik entitlement mismatch
+// check) was REMOVED in 0.2.0 along with the rest of the Authentik
+// integration — the member roster is Seerr's own user list now, so there is
+// no second entitlement list left to drift from. See `CHANGELOG.md` 0.2.0.
 // ---------------------------------------------------------------------------
 // Server-side pagination math (`FR-ADM-5`: "paginate server-side... a member
 // drill-down must not load 500 rows into the browser"). Pure: given a
@@ -568,6 +550,21 @@ export function buildPipelineStatus(
     overallOk: latestRow.ok,
     steps,
   };
+}
+
+/**
+ * Second security review (PR #17), "SHOULD-FIX 2": detects "the most recent
+ * `members` sync cycle was refused by `checkMassRevocationRisk`" purely
+ * from the already-loaded `pipelines` array, so the admin dashboard can
+ * conditionally show the one-shot "apply roster sync anyway" override
+ * control (`ForceMembersSyncControl`) only when it's actually relevant —
+ * never on an ordinary successful or merely-stale cycle.
+ */
+export function wasMembersSyncRefusedByMassRevocationGuard(pipelines: readonly PipelineStatus[]): boolean {
+  const membersPipeline = pipelines.find((p) => p.kind === 'members');
+  if (!membersPipeline) return false;
+  const classifyStep = membersPipeline.steps.find((s) => s.stepKey === 'classify');
+  return classifyStep?.error?.includes(MASS_REVOCATION_REFUSAL_MARKER) ?? false;
 }
 
 /** Trailing-window length for the linear runway estimate (`estimateRunwayDays`) — see that function's header comment for why this isn't the full monthly-bucketed trend engine. */

@@ -1,338 +1,546 @@
 import { describe, expect, it } from 'vitest';
-import type { AuthentikIdentity } from '@/lib/authentik/identity';
+import { checkMassRevocationRisk, classifyMembers, type OperatorConfig } from '@/lib/members/classify';
 import type { SeerrUserForMatch } from '@/lib/members/seerrUsers';
 import type { ExistingMemberSnapshot } from '@/lib/members/types';
-import { classifyMembers, type OperatorConfig } from '@/lib/members/classify';
 
-const NOW = 1_800_000_000;
+const NOW = 1_700_000_000;
+const operatorConfig: OperatorConfig = { adminUsers: ['admin'] };
 
-/** Matches src/lib/config.ts's real defaults (ADMIN_USERS=admin, ADMIN_GROUP=admins). */
-const OPERATOR_CONFIG: OperatorConfig = { adminUsers: ['admin'], adminGroup: 'admins' };
-
-function identity(ssoUsername: string, overrides: Partial<AuthentikIdentity> = {}): AuthentikIdentity {
+function seerrUser(overrides: Partial<SeerrUserForMatch> & { id: number }): SeerrUserForMatch {
   return {
-    ssoUsername,
-    authentikUuid: `uuid-${ssoUsername}`,
-    displayName: ssoUsername,
-    email: `${ssoUsername}@example.com`,
-    groupNames: [],
-    ...overrides,
+    id: overrides.id,
+    email: overrides.email ?? null,
+    username: overrides.username ?? null,
+    displayName: overrides.displayName ?? null,
+    jellyfinUsername: overrides.jellyfinUsername ?? null,
+    jellyfinUserId: overrides.jellyfinUserId ?? null,
   };
 }
 
-function seerrUser(id: number, overrides: Partial<SeerrUserForMatch> = {}): SeerrUserForMatch {
-  return { id, email: `user${id}@example.com`, username: null, displayName: `user${id}`, jellyfinUsername: `user${id}`, jellyfinUserId: `guid-${id}`, ...overrides };
-}
-
-function existingSnapshot(ssoUsername: string, overrides: Partial<ExistingMemberSnapshot> = {}): ExistingMemberSnapshot {
+function existing(overrides: Partial<ExistingMemberSnapshot> & { ssoUsername: string }): ExistingMemberSnapshot {
   return {
-    ssoUsername,
-    authentikUuid: null,
-    displayName: ssoUsername,
-    email: null,
-    entitled: false,
-    seerrUserId: null,
-    jellyfinUserId: null,
-    syncStatus: 'not_entitled',
-    syncNote: null,
-    firstSeenAt: 0,
-    isOperator: false,
-    ...overrides,
+    ssoUsername: overrides.ssoUsername,
+    authentikUuid: overrides.authentikUuid ?? null,
+    displayName: overrides.displayName ?? null,
+    email: overrides.email ?? null,
+    entitled: overrides.entitled ?? true,
+    seerrUserId: overrides.seerrUserId ?? null,
+    jellyfinUserId: overrides.jellyfinUserId ?? null,
+    syncStatus: overrides.syncStatus ?? 'matched',
+    syncNote: overrides.syncNote ?? null,
+    firstSeenAt: overrides.firstSeenAt ?? NOW - 1000,
+    isOperator: overrides.isOperator ?? false,
+    loginAlias: overrides.loginAlias ?? null,
   };
 }
 
-const NO_EXISTING: ReadonlyMap<string, ExistingMemberSnapshot> = new Map();
+describe('classifyMembers — roster source is Seerr directly (0.2.0)', () => {
+  it('every current Seerr user with no existing row becomes a brand-new, entitled, matched member', () => {
+    const users = [seerrUser({ id: 1, jellyfinUsername: 'dana', email: 'dana@example.com', displayName: 'Dana' })];
+    const out = classifyMembers(users, new Map(), NOW, operatorConfig);
+    expect(out).toEqual([
+      {
+        ssoUsername: 'dana',
+        authentikUuid: null,
+        displayName: 'Dana',
+        email: 'dana@example.com',
+        entitled: true,
+        seerrUserId: 1,
+        jellyfinUserId: null,
+        syncStatus: 'matched',
+        syncNote: null,
+        isNew: true,
+        firstSeenAt: NOW,
+        isOperator: false,
+      },
+    ]);
+  });
 
-describe('classifyMembers — basic matching (FR-SYNC-2)', () => {
-  it('matches by jellyfinUsername, case-insensitively', () => {
-    const frank = identity('frank', { email: 'frank-real@example.com' });
-    const seerrFrank = seerrUser(8, { jellyfinUsername: 'FRANK', email: 'unrelated@example.com' });
-    const out = classifyMembers([frank], [seerrFrank], NO_EXISTING, NOW, OPERATOR_CONFIG);
+  it('new-row key priority: jellyfinUsername > username > email > seerr:{id}', () => {
+    const byUsername = classifyMembers([seerrUser({ id: 1, username: 'erin', email: 'erin@example.com' })], new Map(), NOW, operatorConfig);
+    expect(byUsername[0].ssoUsername).toBe('erin');
+
+    const byEmail = classifyMembers([seerrUser({ id: 2, email: 'frank@example.com' })], new Map(), NOW, operatorConfig);
+    expect(byEmail[0].ssoUsername).toBe('frank@example.com');
+
+    const byId = classifyMembers([seerrUser({ id: 3 })], new Map(), NOW, operatorConfig);
+    expect(byId[0].ssoUsername).toBe('seerr:3');
+  });
+
+  it('key derivation lowercases and trims, matching the pre-0.2.0 convention', () => {
+    const out = classifyMembers([seerrUser({ id: 1, jellyfinUsername: '  Dana  ' })], new Map(), NOW, operatorConfig);
+    expect(out[0].ssoUsername).toBe('dana');
+  });
+
+  // --- CRITICAL: production continuity (task item 2) ---------------------
+
+  it('an existing member row already linked to a Seerr user (seerr_user_id set) KEEPS its sso_username forever, even if the Seerr-side username/jellyfinUsername changes', () => {
+    const existingRow = existing({ ssoUsername: 'legacy-login-name', seerrUserId: 42, email: 'dana@example.com' });
+    const existingMembers = new Map([[existingRow.ssoUsername, existingRow]]);
+    // Seerr now reports a totally different jellyfinUsername/email for the same account id.
+    const users = [seerrUser({ id: 42, jellyfinUsername: 'brand-new-name', email: 'dana-new@example.com', displayName: 'Dana' })];
+
+    const out = classifyMembers(users, existingMembers, NOW, operatorConfig);
+
     expect(out).toHaveLength(1);
-    expect(out[0]).toMatchObject({ ssoUsername: 'frank', syncStatus: 'matched', seerrUserId: 8, syncNote: null, entitled: true, isNew: true });
+    expect(out[0].ssoUsername).toBe('legacy-login-name'); // NOT 'brand-new-name'
+    expect(out[0].seerrUserId).toBe(42);
+    expect(out[0].entitled).toBe(true);
+    expect(out[0].syncStatus).toBe('matched');
+    expect(out[0].isNew).toBe(false);
   });
 
-  it('falls back to email match, case-insensitively, only when username match finds nothing', () => {
-    const dana = identity('dana', { email: 'dana@example.com' });
-    const seerrDana = seerrUser(4, { jellyfinUsername: null, email: 'dana@example.com' });
-    const out = classifyMembers([dana], [seerrDana], NO_EXISTING, NOW, OPERATOR_CONFIG);
-    expect(out[0]).toMatchObject({ syncStatus: 'matched', seerrUserId: 4 });
+  it('never creates a duplicate row for a Seerr user already linked to an existing member', () => {
+    const existingRow = existing({ ssoUsername: 'dana', seerrUserId: 42 });
+    const existingMembers = new Map([[existingRow.ssoUsername, existingRow]]);
+    const users = [seerrUser({ id: 42, jellyfinUsername: 'dana' })];
+
+    const out = classifyMembers(users, existingMembers, NOW, operatorConfig);
+    expect(out).toHaveLength(1);
+    expect(out.filter((m) => m.seerrUserId === 42)).toHaveLength(1);
   });
 
-  it('a username hit is never second-guessed by also checking email — even if email would point elsewhere', () => {
-    const jack = identity('jack', { email: 'jack@example.com' });
-    const usernameMatch = seerrUser(1, { jellyfinUsername: 'jack', email: 'decoy@example.com' });
-    const emailMatch = seerrUser(2, { jellyfinUsername: 'someone-else', email: 'jack@example.com' });
-    const out = classifyMembers([jack], [usernameMatch, emailMatch], NO_EXISTING, NOW, OPERATOR_CONFIG);
-    expect(out[0]).toMatchObject({ syncStatus: 'matched', seerrUserId: 1 });
+  it('a genuinely new Seerr user (no linked row) creates exactly one new member row', () => {
+    const existingRow = existing({ ssoUsername: 'dana', seerrUserId: 1 });
+    const existingMembers = new Map([[existingRow.ssoUsername, existingRow]]);
+    const users = [seerrUser({ id: 1, jellyfinUsername: 'dana' }), seerrUser({ id: 2, jellyfinUsername: 'erin' })];
+
+    const out = classifyMembers(users, existingMembers, NOW, operatorConfig);
+    expect(out).toHaveLength(2);
+    const erin = out.find((m) => m.seerrUserId === 2);
+    expect(erin).toBeDefined();
+    expect(erin?.ssoUsername).toBe('erin');
+    expect(erin?.isNew).toBe(true);
   });
 
-  it('zero candidates -> no_seerr_account, with a non-null sync_note (FR-SYNC-4)', () => {
-    const ivy = identity('ivy');
-    const out = classifyMembers([ivy], [], NO_EXISTING, NOW, OPERATOR_CONFIG);
-    expect(out[0].syncStatus).toBe('no_seerr_account');
-    expect(out[0].syncNote).not.toBeNull();
+  it('a Seerr user removed from Seerr -> existing member flips entitled=false/not_entitled and the row is KEPT', () => {
+    const existingRow = existing({ ssoUsername: 'dana', seerrUserId: 42, entitled: true, syncStatus: 'matched' });
+    const existingMembers = new Map([[existingRow.ssoUsername, existingRow]]);
+
+    const out = classifyMembers([], existingMembers, NOW, operatorConfig); // Seerr no longer lists this user at all
+
+    expect(out).toHaveLength(1);
+    expect(out[0].ssoUsername).toBe('dana');
+    expect(out[0].entitled).toBe(false);
+    expect(out[0].syncStatus).toBe('not_entitled');
+    expect(out[0].seerrUserId).toBe(42); // linkage preserved for history
+    expect(out[0].syncNote).toContain('Lost their Seerr account');
+  });
+
+  it('a member already not_entitled before this cycle, still absent from Seerr, is carried forward unchanged (no repeated "lost" note)', () => {
+    const existingRow = existing({
+      ssoUsername: 'dana',
+      seerrUserId: null,
+      entitled: false,
+      syncStatus: 'not_entitled',
+      syncNote: 'some earlier note',
+    });
+    const existingMembers = new Map([[existingRow.ssoUsername, existingRow]]);
+
+    const out = classifyMembers([], existingMembers, NOW, operatorConfig);
+    expect(out[0].syncNote).toBe('some earlier note');
+  });
+
+  it('a legacy orphan row (pre-0.2.0, no seerr_user_id, keyed by the derived convention) gets LINKED rather than duplicated when its Seerr account resurfaces', () => {
+    const existingRow = existing({ ssoUsername: 'akadmin', seerrUserId: null, entitled: false, syncStatus: 'not_entitled' });
+    const existingMembers = new Map([[existingRow.ssoUsername, existingRow]]);
+    const users = [seerrUser({ id: 99, username: 'akadmin' })];
+
+    const out = classifyMembers(users, existingMembers, NOW, operatorConfig);
+    expect(out).toHaveLength(1);
+    expect(out[0].ssoUsername).toBe('akadmin');
+    expect(out[0].seerrUserId).toBe(99);
+    expect(out[0].entitled).toBe(true);
+    expect(out[0].isNew).toBe(false); // existing row reused, not created fresh
+  });
+
+  // --- Orphan key collisions ----------------------------------------------
+
+  it('two distinct NEW Seerr users deriving the identical key are both surfaced as a single ambiguous row, neither linked', () => {
+    const users = [seerrUser({ id: 1, jellyfinUsername: 'shared' }), seerrUser({ id: 2, jellyfinUsername: 'shared' })];
+    const out = classifyMembers(users, new Map(), NOW, operatorConfig);
+    expect(out).toHaveLength(1);
+    expect(out[0].ssoUsername).toBe('shared');
+    expect(out[0].syncStatus).toBe('ambiguous');
     expect(out[0].seerrUserId).toBeNull();
-    expect(out[0].jellyfinUserId).toBeNull();
+    expect(out[0].syncNote).toContain('1');
+    expect(out[0].syncNote).toContain('2');
   });
 
-  it('an empty/blank email never matches another blank email (family has no email on file)', () => {
-    const family = identity('family', { email: '' });
-    const someoneElseBlank = seerrUser(50, { jellyfinUsername: 'not-family', email: '' });
-    const out = classifyMembers([family], [someoneElseBlank], NO_EXISTING, NOW, OPERATOR_CONFIG);
-    expect(out[0].syncStatus).toBe('no_seerr_account'); // NOT matched to the blank-email decoy
-  });
+  // --- Operator status (FR-ENF-6, background half: ADMIN_USERS only) -----
 
-  it('jellyfin_user_id is normalised (no dashes, lowercase) on a matched member', () => {
-    const frank = identity('frank');
-    const rawId = '7BBB-0000-AAAA-1111-000000000000';
-    const seerrFrank = seerrUser(8, { jellyfinUsername: 'frank', jellyfinUserId: rawId });
-    const out = classifyMembers([frank], [seerrFrank], NO_EXISTING, NOW, OPERATOR_CONFIG);
-    expect(out[0].jellyfinUserId).toBe(rawId.replace(/-/g, '').toLowerCase());
-    expect(out[0].jellyfinUserId).not.toContain('-');
-    expect(out[0].jellyfinUserId).toBe(out[0].jellyfinUserId?.toLowerCase());
-  });
-});
-
-describe('classifyMembers — ambiguity, never guess (FR-SYNC-3)', () => {
-  it('one member matching two Seerr candidates via email fallback -> ambiguous, nothing attributed', () => {
-    const twin = identity('twin', { email: 'shared@example.com' });
-    const seerrA = seerrUser(10, { jellyfinUsername: null, email: 'shared@example.com' });
-    const seerrB = seerrUser(11, { jellyfinUsername: null, email: 'shared@example.com' });
-    const out = classifyMembers([twin], [seerrA, seerrB], NO_EXISTING, NOW, OPERATOR_CONFIG);
-    expect(out[0]).toMatchObject({ syncStatus: 'ambiguous', seerrUserId: null, jellyfinUserId: null });
-    expect(out[0].syncNote).toMatch(/ambiguous/i);
-  });
-
-  it('two Seerr users share an email, and TWO different members both fall back to it -> both members ambiguous (acceptance criteria)', () => {
-    const memberA = identity('membera', { email: 'shared-household@example.com' });
-    const memberB = identity('memberb', { email: 'shared-household@example.com' });
-    const seerrA = seerrUser(20, { jellyfinUsername: null, email: 'shared-household@example.com' });
-    const seerrB = seerrUser(21, { jellyfinUsername: null, email: 'shared-household@example.com' });
-    const out = classifyMembers([memberA, memberB], [seerrA, seerrB], NO_EXISTING, NOW, OPERATOR_CONFIG);
-    const a = out.find((m) => m.ssoUsername === 'membera')!;
-    const b = out.find((m) => m.ssoUsername === 'memberb')!;
-    expect(a.syncStatus).toBe('ambiguous');
-    expect(b.syncStatus).toBe('ambiguous');
-    expect(a.seerrUserId).toBeNull();
-    expect(b.seerrUserId).toBeNull();
-  });
-
-  it('a member with a single candidate is still ambiguous if that candidate is ALSO claimed by another member (1:1 in BOTH directions required)', () => {
-    // household account scenario: two members' emails both fall back to the SAME single Seerr row.
-    const parentA = identity('parenta', { email: 'family@example.com' });
-    const parentB = identity('parentb', { email: 'family@example.com' });
-    const familyAccount = seerrUser(30, { jellyfinUsername: null, email: 'family@example.com' });
-    const out = classifyMembers([parentA, parentB], [familyAccount], NO_EXISTING, NOW, OPERATOR_CONFIG);
-    expect(out.every((m) => m.syncStatus === 'ambiguous')).toBe(true);
-    expect(out.every((m) => m.seerrUserId === null)).toBe(true);
-  });
-});
-
-describe('classifyMembers — not_entitled orphans (Seerr row with no Authentik entitlement)', () => {
-  it('a Seerr user not claimed by any entitled identity becomes a new not_entitled member, keyed by jellyfinUsername (akadmin scenario)', () => {
-    // Orphan-keying convention (confirmed with the operator, documented in Feature-02):
-    // jellyfinUsername -> username -> `seerr:{id}`, in that priority — see classify.ts's implementation.
-    const akadmin = seerrUser(9, { jellyfinUsername: 'akadmin', username: null, email: null });
-    const out = classifyMembers([], [akadmin], NO_EXISTING, NOW, OPERATOR_CONFIG);
-    expect(out).toHaveLength(1);
-    expect(out[0]).toMatchObject({ ssoUsername: 'akadmin', entitled: false, syncStatus: 'not_entitled', authentikUuid: null, seerrUserId: 9, isNew: true });
-    expect(out[0].syncNote).not.toBeNull();
-  });
-
-  it('falls back to username, then to a seerr:{id} key, when jellyfinUsername is absent', () => {
-    const localAdmin = seerrUser(9, { jellyfinUsername: null, username: 'localadmin' });
-    const out1 = classifyMembers([], [localAdmin], NO_EXISTING, NOW, OPERATOR_CONFIG);
-    expect(out1[0].ssoUsername).toBe('localadmin');
-
-    const anonymous = seerrUser(42, { jellyfinUsername: null, username: null });
-    const out2 = classifyMembers([], [anonymous], NO_EXISTING, NOW, OPERATOR_CONFIG);
-    expect(out2[0].ssoUsername).toBe('seerr:42');
-  });
-
-  it('does NOT create an orphan for a Seerr user already claimed (matched OR ambiguous) by an entitled identity', () => {
-    const frank = identity('frank');
-    const seerrFrank = seerrUser(8, { jellyfinUsername: 'frank' });
-    const out = classifyMembers([frank], [seerrFrank], NO_EXISTING, NOW, OPERATOR_CONFIG);
-    expect(out).toHaveLength(1); // just frank, no orphan for seerr id 8
-    expect(out[0].ssoUsername).toBe('frank');
-  });
-
-  it('does NOT overwrite an existing known member from a fresh orphan derivation (never guess)', () => {
-    const existing = existingSnapshot('akadmin', {
-      displayName: 'akadmin (operator-edited)',
-      seerrUserId: 9,
-      syncNote: 'operator note',
-      firstSeenAt: 100,
+  it('isOperator is computed from ADMIN_USERS only — no groups source exists for a background sync (existing linked member)', () => {
+    const existingRow = existing({ ssoUsername: 'admin', seerrUserId: 1 });
+    const out = classifyMembers([seerrUser({ id: 1, username: 'admin' })], new Map([[existingRow.ssoUsername, existingRow]]), NOW, {
+      adminUsers: ['admin'],
     });
-    const existingMembers = new Map([['akadmin', existing]]);
-    const akadmin = seerrUser(9, { jellyfinUsername: 'akadmin' });
-    const out = classifyMembers([], [akadmin], existingMembers, NOW, OPERATOR_CONFIG);
-    expect(out).toHaveLength(1);
-    expect(out[0].displayName).toBe('akadmin (operator-edited)'); // carried forward, not clobbered by orphan-derivation
-    expect(out[0].firstSeenAt).toBe(100);
-  });
-
-  it('an orphan whose derived key is itself an ADMIN_USERS entry is flagged isOperator (username-only check — no Authentik data exists for it)', () => {
-    const seerrAdmin = seerrUser(99, { jellyfinUsername: 'admin', username: null });
-    const out = classifyMembers([], [seerrAdmin], NO_EXISTING, NOW, OPERATOR_CONFIG);
-    expect(out[0]).toMatchObject({ ssoUsername: 'admin', isOperator: true });
-  });
-});
-
-describe('classifyMembers — losing entitlement (FR-SYNC-6)', () => {
-  it('a previously matched, entitled member absent from this cycle\'s entitled set flips to entitled=false, not_entitled, and carries forward identity/history', () => {
-    const existing = existingSnapshot('nora', {
-      authentikUuid: 'uuid-nora',
-      displayName: 'Nora',
-      email: 'nora@example.com',
-      entitled: true,
-      seerrUserId: 55,
-      jellyfinUserId: 'guid-55',
-      syncStatus: 'matched',
-      firstSeenAt: 500,
-    });
-    const existingMembers = new Map([['nora', existing]]);
-    const out = classifyMembers([], [], existingMembers, NOW, OPERATOR_CONFIG); // nora no longer entitled this cycle
-    expect(out).toHaveLength(1);
-    expect(out[0]).toMatchObject({ ssoUsername: 'nora', entitled: false, syncStatus: 'not_entitled', seerrUserId: 55, jellyfinUserId: 'guid-55', isNew: false, firstSeenAt: 500 });
-    expect(out[0].syncNote).toMatch(/lost/i);
-  });
-
-  it('a member already not_entitled and still not entitled is carried forward unchanged (no re-derivation)', () => {
-    const existing = existingSnapshot('milo', { displayName: 'Milo', syncNote: 'previously not_entitled', firstSeenAt: 200 });
-    const existingMembers = new Map([['milo', existing]]);
-    const out = classifyMembers([], [], existingMembers, NOW, OPERATOR_CONFIG);
-    expect(out[0]).toMatchObject({ ssoUsername: 'milo', entitled: false, syncStatus: 'not_entitled', syncNote: 'previously not_entitled', firstSeenAt: 200 });
-  });
-
-  it('re-entitlement: a formerly not_entitled member reappearing in the entitled set is reclassified normally (matched/no_seerr_account/ambiguous), not stuck as not_entitled', () => {
-    const existing = existingSnapshot('hank', {
-      authentikUuid: 'uuid-hank',
-      displayName: 'Hank',
-      email: 'hank@example.com',
-      syncNote: 'was not_entitled',
-      firstSeenAt: 300,
-    });
-    const existingMembers = new Map([['hank', existing]]);
-    const hank = identity('hank', { email: 'hank@example.com' });
-    const out = classifyMembers([hank], [], existingMembers, NOW, OPERATOR_CONFIG);
-    expect(out[0]).toMatchObject({ ssoUsername: 'hank', entitled: true, syncStatus: 'no_seerr_account', isNew: false, firstSeenAt: 300 });
-  });
-});
-
-describe('classifyMembers — isNew / first_seen_at bookkeeping (FR-SYNC-1, FR-SYNC-5 support)', () => {
-  it('a brand-new entitled member is isNew:true with firstSeenAt = nowSeconds', () => {
-    const ivy = identity('ivy');
-    const out = classifyMembers([ivy], [], NO_EXISTING, NOW, OPERATOR_CONFIG);
-    expect(out[0]).toMatchObject({ isNew: true, firstSeenAt: NOW });
-  });
-
-  it('an already-known entitled member keeps its original firstSeenAt and isNew:false', () => {
-    const existing = existingSnapshot('dana', {
-      authentikUuid: 'uuid-dana',
-      displayName: 'Dana',
-      email: 'dana@example.com',
-      entitled: true,
-      seerrUserId: 4,
-      jellyfinUserId: 'guid-4',
-      syncStatus: 'matched',
-      firstSeenAt: 42,
-    });
-    const existingMembers = new Map([['dana', existing]]);
-    const dana = identity('dana', { email: 'dana@example.com' });
-    const seerrDana = seerrUser(4, { jellyfinUsername: 'dana' });
-    const out = classifyMembers([dana], [seerrDana], existingMembers, NOW, OPERATOR_CONFIG);
-    expect(out[0]).toMatchObject({ isNew: false, firstSeenAt: 42 });
-  });
-});
-
-describe('classifyMembers — operator status (FR-ENF-6), computed via the SAME src/lib/auth/identity.ts helpers request-time auth uses', () => {
-  it('an entitled identity in ADMIN_GROUP is isOperator:true, even with a username not in ADMIN_USERS', () => {
-    const someAdmin = identity('someadmin', { groupNames: ['admins'] });
-    const out = classifyMembers([someAdmin], [], NO_EXISTING, NOW, OPERATOR_CONFIG);
     expect(out[0].isOperator).toBe(true);
   });
 
-  it('an entitled identity whose USERNAME is in ADMIN_USERS is isOperator:true, even with no admin group', () => {
-    const admin = identity('admin', { groupNames: [] });
-    const out = classifyMembers([admin], [], NO_EXISTING, NOW, OPERATOR_CONFIG);
+  // --- Second security review (PR #17), item A: fresh-install operator lockout fix ---
+
+  it('FIX (item A): a SINGLE brand-new Seerr user whose derived key matches ADMIN_USERS maps NORMALLY — the ordinary fresh-install case, no longer blocked', () => {
+    const out = classifyMembers([seerrUser({ id: 1, username: 'admin' })], new Map(), NOW, { adminUsers: ['admin'] });
+    expect(out).toHaveLength(1);
+    expect(out[0].ssoUsername).toBe('admin');
+    expect(out[0].syncStatus).toBe('matched');
+    expect(out[0].seerrUserId).toBe(1);
+    expect(out[0].entitled).toBe(true);
     expect(out[0].isOperator).toBe(true);
+    expect(out[0].isNew).toBe(true);
   });
 
-  it('an entitled identity with neither is isOperator:false', () => {
-    const carol = identity('carol', { groupNames: ['friends'] });
-    const out = classifyMembers([carol], [], NO_EXISTING, NOW, OPERATOR_CONFIG);
+  it('fresh install, full operatorConfig: a household of one admin + others all map normally, operator gets isOperator=true, nobody is blocked', () => {
+    const out = classifyMembers([seerrUser({ id: 1, username: 'caleb' }), seerrUser({ id: 2, username: 'cait' })], new Map(), NOW, {
+      adminUsers: ['caleb'],
+    });
+    expect(out).toHaveLength(2);
+    const caleb = out.find((m) => m.ssoUsername === 'caleb');
+    const cait = out.find((m) => m.ssoUsername === 'cait');
+    expect(caleb).toMatchObject({ syncStatus: 'matched', seerrUserId: 1, isOperator: true });
+    expect(cait).toMatchObject({ syncStatus: 'matched', seerrUserId: 2, isOperator: false });
+  });
+
+  it('an ADMIN_USERS key is STILL unsafe when it is ALSO taken by an already-linked member — the admin-reservation alone is never the deciding factor', () => {
+    const existingRow = existing({ ssoUsername: 'admin', seerrUserId: 5 });
+    const existingMembers = new Map([[existingRow.ssoUsername, existingRow]]);
+    // A different, new Seerr account also derives 'admin' as its key.
+    const out = classifyMembers(
+      [seerrUser({ id: 5, username: 'admin' }), seerrUser({ id: 9, username: 'admin', displayName: 'Impersonator' })],
+      existingMembers,
+      NOW,
+      { adminUsers: ['admin'] },
+    );
+    const adminRow = out.find((m) => m.ssoUsername === 'admin');
+    expect(adminRow?.seerrUserId).toBe(5); // untouched, still the real admin
+    const impersonator = out.find((m) => m.ssoUsername === 'seerr:9');
+    expect(impersonator?.syncStatus).toBe('ambiguous');
+  });
+
+  it('an ADMIN_USERS key is STILL ambiguous when more than one NEW Seerr user races for it (same "orphan key collision" rule as any other key, admin-reserved or not)', () => {
+    const out = classifyMembers([seerrUser({ id: 1, username: 'admin' }), seerrUser({ id: 2, username: 'admin' })], new Map(), NOW, {
+      adminUsers: ['admin'],
+    });
+    // The key itself was never taken by anyone, so the shared ambiguous row
+    // lands AT 'admin' (same as any ordinary orphan-key collision) — it is
+    // NOT matched/linked to either account, so no operator access is
+    // actually granted through it (a login resolves here by EXACT match
+    // only, and `syncStatus !== 'matched'` always blocks the dashboard).
+    const adminRow = out.find((m) => m.ssoUsername === 'admin');
+    expect(adminRow?.syncStatus).toBe('ambiguous');
+    expect(adminRow?.seerrUserId).toBeNull();
+    expect(out).toHaveLength(1);
+  });
+
+  it('a non-admin-listed Seerr user is never operator', () => {
+    const out = classifyMembers([seerrUser({ id: 1, username: 'dana' })], new Map(), NOW, { adminUsers: ['admin'] });
     expect(out[0].isOperator).toBe(false);
   });
 
-  it('ADMIN_GROUP comparison is case-insensitive, matching src/lib/auth/identity.ts exactly', () => {
-    const someAdmin = identity('someadmin', { groupNames: ['Admins'] });
-    const out = classifyMembers([someAdmin], [], NO_EXISTING, NOW, OPERATOR_CONFIG);
+  it('an existing operator flag is preserved (OR-ed) for a carried-forward member even after losing entitlement', () => {
+    const existingRow = existing({ ssoUsername: 'dana', seerrUserId: null, entitled: true, isOperator: true });
+    const existingMembers = new Map([[existingRow.ssoUsername, existingRow]]);
+    const out = classifyMembers([], existingMembers, NOW, { adminUsers: [] });
     expect(out[0].isOperator).toBe(true);
   });
 
-  it('a carried-forward (not currently entitled) member re-checks the cheap username half fresh, OR\'d with the prior recorded value (group half cannot be re-verified without fresh Authentik data)', () => {
-    // Was operator via group membership while still entitled; now outside the entitled set this cycle
-    // (no fresh Authentik data at all) — the prior group-derived grant is carried forward rather than dropped.
-    const existing = existingSnapshot('formeradmin', { entitled: true, syncStatus: 'matched', isOperator: true });
-    const existingMembers = new Map([['formeradmin', existing]]);
-    const out = classifyMembers([], [], existingMembers, NOW, OPERATOR_CONFIG);
-    expect(out[0].isOperator).toBe(true); // carried forward, not silently dropped
+  // --- first_seen_at / displayName fallbacks ------------------------------
 
-    // A member who was never an operator, and isn't in ADMIN_USERS, stays false.
-    const existing2 = existingSnapshot('regularperson', { entitled: true, syncStatus: 'matched', isOperator: false });
-    const existingMembers2 = new Map([['regularperson', existing2]]);
-    const out2 = classifyMembers([], [], existingMembers2, NOW, OPERATOR_CONFIG);
-    expect(out2[0].isOperator).toBe(false);
+  it('firstSeenAt is carried forward for a linked existing row, set to nowSeconds for a brand-new one', () => {
+    const existingRow = existing({ ssoUsername: 'dana', seerrUserId: 1, firstSeenAt: 111 });
+    const existingMembers = new Map([[existingRow.ssoUsername, existingRow]]);
+    const out = classifyMembers([seerrUser({ id: 1 }), seerrUser({ id: 2, username: 'erin' })], existingMembers, NOW, operatorConfig);
+    expect(out.find((m) => m.seerrUserId === 1)?.firstSeenAt).toBe(111);
+    expect(out.find((m) => m.seerrUserId === 2)?.firstSeenAt).toBe(NOW);
+  });
 
-    // A member added to ADMIN_USERS after losing entitlement DOES get promptly flagged (the username
-    // half is always cheap/current) even though we have no fresh group data for them.
-    const existing3 = existingSnapshot('admin', { entitled: true, syncStatus: 'matched', isOperator: false });
-    const existingMembers3 = new Map([['admin', existing3]]);
-    const out3 = classifyMembers([], [], existingMembers3, NOW, OPERATOR_CONFIG);
-    expect(out3[0].isOperator).toBe(true);
+  it('displayName falls back to username, then the derived key, when Seerr has no displayName', () => {
+    const byUsername = classifyMembers([seerrUser({ id: 1, username: 'gus' })], new Map(), NOW, operatorConfig);
+    expect(byUsername[0].displayName).toBe('gus');
+
+    const byKey = classifyMembers([seerrUser({ id: 2 })], new Map(), NOW, operatorConfig);
+    expect(byKey[0].displayName).toBe('seerr:2');
+  });
+
+  it('jellyfinUserId is normalised (dashes stripped, lowercased) exactly as before 0.2.0', () => {
+    const out = classifyMembers(
+      [seerrUser({ id: 1, username: 'dana', jellyfinUserId: 'AAAA-BBBB-CCCC-DDDD' })],
+      new Map(),
+      NOW,
+      operatorConfig,
+    );
+    expect(out[0].jellyfinUserId).toBe('aaaabbbbccccdddd');
+  });
+
+  it('no Seerr users and no existing members -> empty output, never throws', () => {
+    expect(classifyMembers([], new Map(), NOW, operatorConfig)).toEqual([]);
+  });
+
+  // --- Security review (PR #17): shared-namespace / linked-row-immutability -----
+
+  describe('a new Seerr user deriving an already-LINKED member\'s key never overwrites that link (PoC scenario 2)', () => {
+    const existingRow = existing({ ssoUsername: 'alice', seerrUserId: 5, email: 'alice@x', entitled: true, isOperator: false });
+    const existingMembers = new Map([[existingRow.ssoUsername, existingRow]]);
+
+    it('alice (id 5) stays matched/linked; the colliding new account (id 9, username alice) is ambiguous at a seerr:{id} key, alice untouched', () => {
+      const users = [
+        seerrUser({ id: 5, email: 'alice@x', jellyfinUsername: 'alice2' }), // same account, Seerr renamed its jellyfinUsername
+        seerrUser({ id: 9, email: 'evil@x', username: 'alice', displayName: 'Evil' }), // different account deriving the SAME key
+      ];
+      const out = classifyMembers(users, existingMembers, NOW, { adminUsers: [] });
+
+      const aliceRow = out.find((m) => m.ssoUsername === 'alice');
+      expect(aliceRow?.seerrUserId).toBe(5); // untouched — still linked to the real alice
+      expect(aliceRow?.email).toBe('alice@x');
+      expect(aliceRow?.syncStatus).toBe('matched');
+
+      const evilRow = out.find((m) => m.ssoUsername === 'seerr:9');
+      expect(evilRow).toBeDefined();
+      expect(evilRow?.seerrUserId).toBeNull();
+      expect(evilRow?.syncStatus).toBe('ambiguous');
+      expect(evilRow?.syncNote).toContain('already-linked');
+
+      // Exactly 2 rows out — no third/duplicate row, no row lost.
+      expect(out).toHaveLength(2);
+    });
+
+    it('a two-way collision of two DIFFERENT new accounts on an already-linked key still leaves the linked member untouched and surfaces both as separate ambiguous rows', () => {
+      const users = [
+        seerrUser({ id: 5, email: 'alice@x', jellyfinUsername: 'alice2' }),
+        seerrUser({ id: 9, email: 'evil@x', username: 'alice', displayName: 'Evil' }),
+        seerrUser({ id: 10, email: 'e2@x', username: 'alice', displayName: 'E2' }),
+      ];
+      const out = classifyMembers(users, existingMembers, NOW, { adminUsers: [] });
+
+      const aliceRow = out.find((m) => m.ssoUsername === 'alice');
+      expect(aliceRow?.seerrUserId).toBe(5);
+      expect(aliceRow?.syncStatus).toBe('matched');
+
+      const evil1 = out.find((m) => m.ssoUsername === 'seerr:9');
+      const evil2 = out.find((m) => m.ssoUsername === 'seerr:10');
+      expect(evil1).toBeDefined();
+      expect(evil2).toBeDefined();
+      expect(evil1?.syncStatus).toBe('ambiguous');
+      expect(evil2?.syncStatus).toBe('ambiguous');
+
+      expect(out).toHaveLength(3);
+    });
+  });
+
+  it('a brand-new Seerr user deriving a key that matches another member\'s login_alias is ambiguous, never created at that key', () => {
+    const existingRow = existing({ ssoUsername: 'real-dana', seerrUserId: 1, loginAlias: 'dana-newidp' });
+    const existingMembers = new Map([[existingRow.ssoUsername, existingRow]]);
+    const users = [
+      seerrUser({ id: 1, jellyfinUsername: null, username: null, email: null }), // keeps the existing link (no-op)
+      seerrUser({ id: 2, username: 'dana-newidp', email: 'someone-else@example.com' }), // derives the SAME string as dana's alias
+    ];
+    const out = classifyMembers(users, existingMembers, NOW, { adminUsers: [] });
+
+    const danaRow = out.find((m) => m.seerrUserId === 1);
+    expect(danaRow?.ssoUsername).toBe('real-dana');
+
+    const colliding = out.find((m) => m.ssoUsername === 'seerr:2');
+    expect(colliding).toBeDefined(); // NOT keyed 'dana-newidp'
+    expect(colliding?.seerrUserId).toBeNull();
+    expect(colliding?.syncStatus).toBe('ambiguous');
+    expect(colliding?.syncNote).toContain('login alias');
+  });
+
+  it('a carried-forward member that was entitled but never had a confirmed seerr_user_id gets an honest syncNote, not "lost their Seerr account"', () => {
+    const existingRow = existing({ ssoUsername: 'seerr:42', seerrUserId: null, entitled: true, syncStatus: 'ambiguous' });
+    const existingMembers = new Map([[existingRow.ssoUsername, existingRow]]);
+    const out = classifyMembers([], existingMembers, NOW, operatorConfig);
+    expect(out[0].entitled).toBe(false);
+    expect(out[0].syncNote).not.toContain('Lost their Seerr account');
+    expect(out[0].syncNote).toContain('never linked to a confirmed Seerr account');
+  });
+
+  it('a carried-forward member that WAS confirmed-linked still gets the "lost their Seerr account" note when it disappears', () => {
+    const existingRow = existing({ ssoUsername: 'dana', seerrUserId: 7, entitled: true, syncStatus: 'matched' });
+    const existingMembers = new Map([[existingRow.ssoUsername, existingRow]]);
+    const out = classifyMembers([], existingMembers, NOW, operatorConfig);
+    expect(out[0].syncNote).toContain('Lost their Seerr account');
+  });
+
+  // --- Second security review (PR #17), item B: seerr:{id} fallback must not decay ---
+
+  describe('a persisting ambiguous collision (seerr:{id} fallback) across multiple cycles', () => {
+    it('is RE-EMITTED, not dropped, on a second cycle where the same collision still holds — no false "lost their Seerr account"', () => {
+      const users = [seerrUser({ id: 1, jellyfinUsername: 'shared' }), seerrUser({ id: 2, jellyfinUsername: 'shared', username: 'other', displayName: 'Other' })];
+      // Collision arises because 'shared' key is taken by an already-linked member.
+      const existingRow = existing({ ssoUsername: 'shared', seerrUserId: 1 });
+      const existingMembers = new Map([[existingRow.ssoUsername, existingRow]]);
+
+      const cycle1 = classifyMembers(users, existingMembers, NOW, { adminUsers: [] });
+      const fallbackRow1 = cycle1.find((m) => m.ssoUsername === 'seerr:2');
+      expect(fallbackRow1).toBeDefined();
+      expect(fallbackRow1?.isNew).toBe(true);
+      expect(fallbackRow1?.firstSeenAt).toBe(NOW);
+      expect(fallbackRow1?.entitled).toBe(true);
+      expect(fallbackRow1?.syncStatus).toBe('ambiguous');
+
+      // Persist cycle1's output as the next cycle's "existing" snapshot.
+      const existingMembers2 = new Map(cycle1.map((m) => [m.ssoUsername, { ...m, loginAlias: null } as ExistingMemberSnapshot]));
+      const NOW2 = NOW + 1000;
+      const cycle2 = classifyMembers(users, existingMembers2, NOW2, { adminUsers: [] });
+
+      const fallbackRow2 = cycle2.find((m) => m.ssoUsername === 'seerr:2');
+      expect(fallbackRow2).toBeDefined();
+      // Re-emitted, not decayed: still entitled+ambiguous, firstSeenAt preserved from cycle 1, isNew now false.
+      expect(fallbackRow2?.entitled).toBe(true);
+      expect(fallbackRow2?.syncStatus).toBe('ambiguous');
+      expect(fallbackRow2?.isNew).toBe(false);
+      expect(fallbackRow2?.firstSeenAt).toBe(NOW); // preserved from cycle 1, NOT re-derived as NOW2
+      expect(fallbackRow2?.syncNote).not.toContain('Lost their Seerr account');
+
+      // The 'shared' linked row is also unaffected across both cycles.
+      expect(cycle2.find((m) => m.ssoUsername === 'shared')?.seerrUserId).toBe(1);
+    });
+
+    it('is correctly retired (carried forward not_entitled) once the underlying collision actually resolves', () => {
+      const existingFallback = existing({ ssoUsername: 'seerr:2', seerrUserId: null, entitled: true, syncStatus: 'ambiguous', firstSeenAt: NOW - 500 });
+      const existingMembers = new Map([[existingFallback.ssoUsername, existingFallback]]);
+      // This cycle, Seerr account 2 derives a key that's now free (collision resolved).
+      const out = classifyMembers([seerrUser({ id: 2, jellyfinUsername: 'nowfree' })], existingMembers, NOW, { adminUsers: [] });
+
+      expect(out.find((m) => m.ssoUsername === 'nowfree')?.seerrUserId).toBe(2);
+      const retiredFallback = out.find((m) => m.ssoUsername === 'seerr:2');
+      expect(retiredFallback?.entitled).toBe(false);
+      expect(retiredFallback?.syncStatus).toBe('not_entitled');
+    });
+  });
+
+  // --- Second security review (PR #17), SHOULD-FIX 1: a vanished link must not be stolen ---
+
+  it('a member whose linked Seerr account vanished from the current list is NOT adopted by a different new Seerr account reusing the same username', () => {
+    // alice linked to Seerr id 5; this cycle, Seerr id 5 is GONE (deleted),
+    // but Seerr id 9 is a brand-new, unrelated account with username 'alice'.
+    const existingRow = existing({ ssoUsername: 'alice', seerrUserId: 5, entitled: true, syncStatus: 'matched' });
+    const existingMembers = new Map([[existingRow.ssoUsername, existingRow]]);
+    const users = [seerrUser({ id: 9, username: 'alice', displayName: 'New Alice?' })];
+
+    const out = classifyMembers(users, existingMembers, NOW, { adminUsers: [] });
+
+    const aliceRow = out.find((m) => m.ssoUsername === 'alice');
+    expect(aliceRow?.seerrUserId).toBe(5); // UNTOUCHED — still the real alice's old link
+    expect(aliceRow?.entitled).toBe(false); // carried forward as not_entitled (id 5 really is gone)
+    expect(aliceRow?.syncStatus).toBe('not_entitled');
+
+    const newAccount = out.find((m) => m.ssoUsername === 'seerr:9');
+    expect(newAccount).toBeDefined();
+    expect(newAccount?.syncStatus).toBe('ambiguous');
+    expect(newAccount?.syncNote).toContain('already-linked');
   });
 });
 
-describe('classifyMembers — the documented correctness bar (wiki/Feature-02-Account-Sync.md worked table)', () => {
-  it('reproduces every documented classification exactly: 6 matched, 4 no_seerr_account, 1 not_entitled (akadmin)', () => {
-    const entitledUsernames = ['admin', 'carol', 'dana', 'erin', 'jack', 'frank', 'ivy', 'hank', 'family', 'gus'];
-    const entitled = entitledUsernames.map((u) =>
-      identity(u, { email: u === 'family' ? '' : `${u}@example.com`, groupNames: u === 'admin' ? ['admins'] : [] }),
-    );
+describe('checkMassRevocationRisk (security review, PR #17, item 5)', () => {
+  function entitledRow(ssoUsername: string, seerrUserId: number): ReturnType<typeof existing> {
+    return existing({ ssoUsername, seerrUserId, entitled: true, syncStatus: 'matched' });
+  }
 
-    // Only admin/carol/dana/erin/jack/frank have Seerr rows (7 users
-    // total = 6 matched + akadmin). jellyfinUsername mirrors the Authentik username, matching
-    // the real shape Seerr returns (e.g. requestedBy.jellyfinUsername === 'frank').
-    const matchedUsernames = ['admin', 'carol', 'dana', 'erin', 'jack', 'frank'];
-    const seerrUsers: SeerrUserForMatch[] = [
-      ...matchedUsernames.map((u, i) => seerrUser(i + 1, { jellyfinUsername: u, email: `${u}@example.com` })),
-      seerrUser(9, { jellyfinUsername: null, username: 'akadmin', displayName: 'akadmin', email: null }),
-    ];
+  it('no existing entitled members -> never refuses, regardless of the Seerr list', () => {
+    expect(checkMassRevocationRisk(new Map(), [])).toEqual({ refuse: false });
+  });
 
-    const out = classifyMembers(entitled, seerrUsers, NO_EXISTING, NOW, OPERATOR_CONFIG);
+  it('an empty Seerr list while >=1 member is entitled -> refuses', () => {
+    const existingMembers = new Map([['dana', entitledRow('dana', 1)]]);
+    const result = checkMassRevocationRisk(existingMembers, []);
+    expect(result.refuse).toBe(true);
+    expect(result.reason).toContain('empty user list');
+  });
 
-    for (const u of matchedUsernames) {
-      const row = out.find((m) => m.ssoUsername === u);
-      expect(row?.syncStatus, `${u} should be matched`).toBe('matched');
-      expect(row?.entitled).toBe(true);
-    }
-    for (const u of ['ivy', 'hank', 'family', 'gus']) {
-      const row = out.find((m) => m.ssoUsername === u);
-      expect(row?.syncStatus, `${u} should be no_seerr_account`).toBe('no_seerr_account');
-      expect(row?.entitled).toBe(true);
-    }
-    const akadmin = out.find((m) => m.ssoUsername === 'akadmin');
-    expect(akadmin?.syncStatus).toBe('not_entitled');
-    expect(akadmin?.entitled).toBe(false);
+  it('a normal cycle where everyone is still present -> never refuses', () => {
+    const existingMembers = new Map([
+      ['dana', entitledRow('dana', 1)],
+      ['erin', entitledRow('erin', 2)],
+      ['frank', entitledRow('frank', 3)],
+    ]);
+    const seerrUsers = [1, 2, 3].map((id) => seerrUser({ id, username: `u${id}` }));
+    expect(checkMassRevocationRisk(existingMembers, seerrUsers)).toEqual({ refuse: false });
+  });
 
-    // admin is the operator (admins group) — no one else is.
-    expect(out.find((m) => m.ssoUsername === 'admin')?.isOperator).toBe(true);
-    for (const u of entitledUsernames.filter((u) => u !== 'admin')) {
-      expect(out.find((m) => m.ssoUsername === u)?.isOperator, u).toBe(false);
-    }
+  it('every confirmed-linked member vanishing refuses even with only 1-2 members', () => {
+    const existingMembers = new Map([
+      ['dana', entitledRow('dana', 1)],
+      ['erin', entitledRow('erin', 2)],
+    ]);
+    const unrelated = [50, 51].map((id) => seerrUser({ id, username: `u${id}` }));
+    const result = checkMassRevocationRisk(existingMembers, unrelated);
+    expect(result.refuse).toBe(true);
+    expect(result.reason).toContain('refusing to mass-revoke');
+  });
 
-    expect(out).toHaveLength(11); // 10 entitled + 1 orphan (akadmin)
+  it('a forced check accepts large flips but still refuses an empty list', () => {
+    const existingMembers = new Map([
+      ['dana', entitledRow('dana', 1)],
+      ['erin', entitledRow('erin', 2)],
+      ['frank', entitledRow('frank', 3)],
+    ]);
+    expect(checkMassRevocationRisk(existingMembers, [seerrUser({ id: 1, username: 'u1' })], { forced: true })).toEqual({ refuse: false });
+    expect(checkMassRevocationRisk(existingMembers, [], { forced: true }).refuse).toBe(true);
+  });
+
+  it('losing ONE of three entitled members (33%, under the 50% threshold) -> does not refuse', () => {
+    const existingMembers = new Map([
+      ['dana', entitledRow('dana', 1)],
+      ['erin', entitledRow('erin', 2)],
+      ['frank', entitledRow('frank', 3)],
+    ]);
+    const seerrUsers = [1, 2].map((id) => seerrUser({ id, username: `u${id}` })); // frank (id 3) is gone
+    expect(checkMassRevocationRisk(existingMembers, seerrUsers)).toEqual({ refuse: false });
+  });
+
+  it('losing more than half of >2 entitled members -> refuses', () => {
+    const existingMembers = new Map([
+      ['dana', entitledRow('dana', 1)],
+      ['erin', entitledRow('erin', 2)],
+      ['frank', entitledRow('frank', 3)],
+      ['gus', entitledRow('gus', 4)],
+    ]);
+    const seerrUsers = [1].map((id) => seerrUser({ id, username: `u${id}` })); // 3 of 4 gone (75%)
+    const result = checkMassRevocationRisk(existingMembers, seerrUsers);
+    expect(result.refuse).toBe(true);
+    expect(result.reason).toContain('3 of 4');
+  });
+
+  it('a 1-of-1 or 1-of-2 household losing someone is normal churn, not refused (the >2-member carve-out)', () => {
+    const oneExisting = new Map([['dana', entitledRow('dana', 1)]]);
+    expect(checkMassRevocationRisk(oneExisting, []).refuse).toBe(true); // empty list still refuses regardless of size
+
+    const twoExisting = new Map([
+      ['dana', entitledRow('dana', 1)],
+      ['erin', entitledRow('erin', 2)],
+    ]);
+    // erin (id 2) disappears; dana (id 1) remains — 1 of 2 gone (50%), but
+    // entitledBefore is not > 2, so the percentage rule doesn't apply.
+    expect(checkMassRevocationRisk(twoExisting, [seerrUser({ id: 1, username: 'dana' })]).refuse).toBe(false);
+  });
+
+  // --- Second security review (PR #17), SHOULD-FIX 2: exclude unconfirmed (ambiguous) rows ---
+
+  it('a seerrUserId===null entitled row (ambiguous/legacy placeholder) does NOT count toward entitledBefore or wouldFlip', () => {
+    const existingMembers = new Map([
+      ['dana', entitledRow('dana', 1)],
+      ['erin', entitledRow('erin', 2)],
+      ['frank', entitledRow('frank', 3)],
+      // Four ambiguous placeholders, entitled=true, seerrUserId=null — would
+      // have inflated both counts under the old (buggy) implementation.
+      ['seerr:90', existing({ ssoUsername: 'seerr:90', seerrUserId: null, entitled: true, syncStatus: 'ambiguous' })],
+      ['seerr:91', existing({ ssoUsername: 'seerr:91', seerrUserId: null, entitled: true, syncStatus: 'ambiguous' })],
+      ['seerr:92', existing({ ssoUsername: 'seerr:92', seerrUserId: null, entitled: true, syncStatus: 'ambiguous' })],
+      ['seerr:93', existing({ ssoUsername: 'seerr:93', seerrUserId: null, entitled: true, syncStatus: 'ambiguous' })],
+    ]);
+    // All 3 CONFIRMED members remain; an empty list would previously have
+    // been read as "7 entitled, all would flip" and refused for the wrong
+    // reason — now it's correctly scoped to the 3 confirmed-linked ones.
+    const seerrUsers = [1, 2, 3].map((id) => seerrUser({ id, username: `u${id}` }));
+    expect(checkMassRevocationRisk(existingMembers, seerrUsers)).toEqual({ refuse: false });
+  });
+
+  it('an empty Seerr list while ONLY ambiguous/unconfirmed rows are entitled -> does NOT refuse (nothing confirmed to protect)', () => {
+    const existingMembers = new Map([
+      ['seerr:90', existing({ ssoUsername: 'seerr:90', seerrUserId: null, entitled: true, syncStatus: 'ambiguous' })],
+    ]);
+    expect(checkMassRevocationRisk(existingMembers, [])).toEqual({ refuse: false });
   });
 });

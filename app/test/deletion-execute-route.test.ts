@@ -110,6 +110,7 @@ describe('POST /api/deletion/execute — identity + request-shape guard', () => 
   });
 
   it('400s on invalid JSON body', async () => {
+    seedMember('frank');
     asMember('frank');
     const req = new NextRequest('http://x/api/deletion/execute', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{not json' });
     const res = await POST(req);
@@ -117,21 +118,31 @@ describe('POST /api/deletion/execute — identity + request-shape guard', () => 
   });
 
   it('400s when items is missing', async () => {
+    seedMember('frank');
     asMember('frank');
     const res = await POST(postJson({}));
     expect(res.status).toBe(400);
   });
 
   it('400s when items is an empty array', async () => {
+    seedMember('frank');
     asMember('frank');
     const res = await POST(postJson({ items: [] }));
     expect(res.status).toBe(400);
   });
 
   it('400s when an item has no titleId', async () => {
+    seedMember('frank');
     asMember('frank');
     const res = await POST(postJson({ items: [{ requestedMode: 'delete_files' }] }));
     expect(res.status).toBe(400);
+  });
+
+  it('403s (not 400) when the caller is NOT a currently matched/entitled member (security review, PR #17) — never reaches body validation', async () => {
+    // Deliberately no seedMember() call — 'ghost' has no member row at all.
+    asMember('ghost');
+    const res = await POST(postJson({ items: [] }));
+    expect(res.status).toBe(403);
   });
 });
 
